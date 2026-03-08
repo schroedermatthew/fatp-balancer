@@ -1,0 +1,1821 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fatp-balancer — Phase 6 Demo</title>
+<style>
+/* ── Reset & base ─────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg0:   #0d1117;
+  --bg1:   #161b22;
+  --bg2:   #1c2128;
+  --bg3:   #21262d;
+  --border:#30363d;
+  --text0: #e6edf3;
+  --text1: #8b949e;
+  --text2: #484f58;
+  --accent:#58a6ff;
+  --green: #3fb950;
+  --yellow:#d29922;
+  --orange:#f0883e;
+  --red:   #f85149;
+  --purple:#bc8cff;
+  --cyan:  #39d353;
+
+  --state-idle:      #3fb950;
+  --state-busy:      #58a6ff;
+  --state-overloaded:#f0883e;
+  --state-draining:  #d29922;
+  --state-failed:    #f85149;
+  --state-recovering:#bc8cff;
+  --state-offline:   #484f58;
+
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --radius: 6px;
+  --radius-lg: 10px;
+}
+
+html, body {
+  height: 100%;
+  background: var(--bg0);
+  color: var(--text0);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* ── Layout ────────────────────────────────────────────────────────────── */
+body {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+header {
+  background: var(--bg1);
+  border-bottom: 1px solid var(--border);
+  padding: 0 20px;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-shrink: 0;
+  height: 52px;
+}
+
+.logo {
+  font-size: 15px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  color: var(--accent);
+  white-space: nowrap;
+}
+.logo span { color: var(--text1); font-weight: 400; }
+
+.stat-pill {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 3px 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.stat-pill .label { color: var(--text1); }
+.stat-pill .value { color: var(--text0); font-weight: 600; }
+.stat-pill.draining { border-color: var(--yellow); background: rgba(210,153,34,.12); }
+
+.header-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Policy selector */
+select {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  color: var(--text0);
+  padding: 5px 10px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  cursor: pointer;
+}
+select:focus { outline: none; border-color: var(--accent); }
+
+/* Buttons */
+button {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--text0);
+  padding: 5px 14px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background .15s, border-color .15s;
+  white-space: nowrap;
+}
+button:hover { background: var(--bg2); border-color: var(--accent); }
+button.primary { background: var(--accent); color: #0d1117; border-color: var(--accent); font-weight: 600; }
+button.primary:hover { background: #79b8ff; }
+button.danger  { background: rgba(248,81,73,.15); border-color: var(--red); color: var(--red); }
+button.danger:hover  { background: rgba(248,81,73,.3); }
+button.active  { background: rgba(88,166,255,.2); border-color: var(--accent); color: var(--accent); }
+
+/* ── Body content ──────────────────────────────────────────────────────── */
+.body-wrap {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* ── Left column: nodes ─────────────────────────────────────────────────── */
+.cluster-col {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--text1);
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.nodes-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+/* Node card */
+.node-card {
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 12px;
+  transition: border-color .2s;
+  cursor: pointer;
+  user-select: none;
+}
+.node-card:hover { border-color: var(--accent); }
+.node-card.failed { border-color: var(--red) !important; background: rgba(248,81,73,.05); }
+.node-card.overloaded { border-color: var(--orange); }
+
+.node-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.node-id {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text0);
+}
+.node-actions { display: flex; gap: 4px; }
+.node-actions button {
+  padding: 2px 7px;
+  font-size: 10px;
+  border-radius: 4px;
+}
+
+.state-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  padding: 2px 7px;
+  border-radius: 20px;
+}
+.state-badge::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.state-idle       { color: var(--state-idle);       background: rgba(63,185,80,.12); }
+.state-busy       { color: var(--state-busy);       background: rgba(88,166,255,.12); }
+.state-overloaded { color: var(--state-overloaded); background: rgba(240,136,62,.12); }
+.state-draining   { color: var(--state-draining);   background: rgba(210,153,34,.12); }
+.state-failed     { color: var(--state-failed);     background: rgba(248,81,73,.12); }
+.state-recovering { color: var(--state-recovering); background: rgba(188,140,255,.12); }
+.state-offline    { color: var(--state-offline);    background: rgba(72,79,88,.12); }
+
+/* Utilization bar */
+.util-bar-wrap {
+  margin: 8px 0 6px;
+}
+.util-bar-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--text1);
+  margin-bottom: 3px;
+}
+.util-bar-track {
+  height: 4px;
+  background: var(--bg3);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.util-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width .3s ease, background .3s ease;
+}
+
+/* Queue slots */
+.queue-slots {
+  display: flex;
+  gap: 3px;
+  flex-wrap: wrap;
+  margin: 6px 0;
+}
+.slot {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  background: var(--bg3);
+  transition: background .15s;
+}
+.slot.occupied { background: var(--accent); border-color: var(--accent); }
+.slot.occupied.high { background: var(--orange); border-color: var(--orange); }
+.slot.occupied.crit { background: var(--red); border-color: var(--red); }
+
+/* Node stats row */
+.node-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  font-size: 10px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+.node-stat { color: var(--text1); }
+.node-stat span { color: var(--text0); font-family: var(--font-mono); }
+
+/* ── Right panel ───────────────────────────────────────────────────────── */
+.right-panel {
+  width: 360px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Submit form */
+.submit-panel {
+  background: var(--bg1);
+  border-bottom: 1px solid var(--border);
+  padding: 12px;
+}
+.form-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+  align-items: center;
+}
+.form-row label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--text1);
+  width: 56px;
+  flex-shrink: 0;
+}
+.form-row select, .form-row input {
+  flex: 1;
+  min-width: 0;
+}
+input[type=range] {
+  -webkit-appearance: none;
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg3);
+  border: none;
+  cursor: pointer;
+}
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+}
+.cost-display {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--accent);
+  width: 30px;
+  text-align: right;
+}
+/* ── Auto Simulator panel ────────────────────────────────────────────── */
+.autosim-panel {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.autosim-title {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--text1);
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.autosim-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--text2);
+  transition: background .3s;
+  flex-shrink: 0;
+}
+.autosim-dot.running { background: var(--green); box-shadow: 0 0 6px var(--green); animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.45} }
+
+.scenario-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.scenario-btn {
+  padding: 5px 4px;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 5px;
+  text-align: center;
+  letter-spacing: .02em;
+  line-height: 1.3;
+  border: 1px solid var(--border);
+  background: var(--bg3);
+  color: var(--text1);
+  cursor: pointer;
+  transition: all .15s;
+}
+.scenario-btn:hover { border-color: var(--accent); color: var(--text0); }
+.scenario-btn.active { background: rgba(88,166,255,.18); border-color: var(--accent); color: var(--accent); }
+.scenario-btn.active.scenario-chaos { background: rgba(248,81,73,.18); border-color: var(--red); color: var(--red); }
+.scenario-btn.active.scenario-batch { background: rgba(210,153,34,.18); border-color: var(--yellow); color: var(--yellow); }
+.scenario-btn.active.scenario-rt    { background: rgba(63,185,80,.18); border-color: var(--green); color: var(--green); }
+.scenario-btn.active.scenario-spike { background: rgba(240,136,62,.18); border-color: var(--orange); color: var(--orange); }
+
+.autosim-status {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text1);
+  min-height: 14px;
+  margin-bottom: 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.autosim-status .hi { color: var(--accent); }
+.autosim-status .warn { color: var(--orange); }
+.autosim-status .good { color: var(--green); }
+
+/* Sparkline */
+.sparkline-wrap {
+  position: relative;
+  height: 46px;
+  background: var(--bg0);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 5px;
+}
+canvas#sparkline { display: block; width: 100%; height: 100%; }
+.sparkline-label {
+  position: absolute;
+  top: 3px; left: 5px;
+  font-size: 9px;
+  font-family: var(--font-mono);
+  color: var(--text2);
+  pointer-events: none;
+}
+.sparkline-peak {
+  position: absolute;
+  top: 3px; right: 5px;
+  font-size: 9px;
+  font-family: var(--font-mono);
+  color: var(--text1);
+  pointer-events: none;
+}
+
+/* Fault toggle row */
+.fault-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--text1);
+}
+.fault-toggle-row label { cursor: pointer; user-select: none; display: flex; align-items: center; gap: 4px; }
+input[type=checkbox] {
+  accent-color: var(--red);
+  cursor: pointer;
+  width: 12px; height: 12px;
+}
+
+/* Heatmap */
+.heatmap-panel {
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.heatmap-container {
+  position: relative;
+  margin-top: 10px;
+}
+canvas#heatmap {
+  display: block;
+  border-radius: var(--radius);
+  image-rendering: pixelated;
+}
+.heatmap-legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 10px;
+  color: var(--text1);
+}
+.legend-gradient {
+  flex: 1;
+  height: 8px;
+  border-radius: 4px;
+  background: linear-gradient(to right, #1e6bb8, #2d8dd6, #8b949e, #c95a2e, #c93030);
+}
+.heatmap-labels-x {
+  display: flex;
+  justify-content: space-around;
+  margin-top: 4px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text1);
+}
+.heatmap-labels-y {
+  position: absolute;
+  left: -26px;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  justify-content: space-around;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text1);
+  text-align: right;
+}
+
+/* Event log */
+.event-log {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+}
+.log-scroll {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.log-entry {
+  padding: 2px 0;
+  display: flex;
+  gap: 6px;
+  opacity: 1;
+  transition: opacity .2s;
+  animation: fadeIn .2s ease;
+}
+@keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } }
+.log-time { color: var(--text2); flex-shrink: 0; }
+.log-msg  { color: var(--text1); flex: 1; }
+.log-submit .log-msg   { color: var(--accent); }
+.log-complete .log-msg { color: var(--green); }
+.log-fault .log-msg    { color: var(--orange); }
+.log-policy .log-msg   { color: var(--purple); }
+.log-reject .log-msg   { color: var(--red); }
+
+/* Scrollbars */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────────────────────── -->
+<header>
+  <div class="logo">fatp-balancer <span>/ Phase 6 Demo</span></div>
+
+  <div id="statSubmitted" class="stat-pill"><span class="label">submitted</span>&nbsp;<span class="value" id="valSubmitted">0</span></div>
+  <div id="statInFlight"  class="stat-pill"><span class="label">in-flight</span>&nbsp;<span class="value" id="valInFlight">0</span></div>
+  <div id="statThroughput" class="stat-pill"><span class="label">thr/s</span>&nbsp;<span class="value" id="valThroughput">0.0</span></div>
+  <div id="statPolicy"    class="stat-pill"><span class="label">policy</span>&nbsp;<span class="value" id="valPolicy">LeastLoaded</span></div>
+  <div id="statDraining"  class="stat-pill draining" style="display:none"><span class="label">⚠ draining…</span></div>
+
+  <div class="header-right">
+    <select id="policySelect" title="Active scheduling policy">
+      <option value="RoundRobin">RoundRobin</option>
+      <option value="LeastLoaded" selected>LeastLoaded</option>
+      <option value="AffinityRouting">AffinityRouting</option>
+      <option value="WorkStealing">WorkStealing</option>
+    </select>
+    <button id="btnSwitchPolicy">Switch Policy</button>
+    <button id="btnReset" class="danger">Reset</button>
+  </div>
+</header>
+
+<!-- ── Body ────────────────────────────────────────────────────────────── -->
+<div class="body-wrap">
+
+  <!-- Left: cluster nodes -->
+  <div class="cluster-col">
+    <div class="section-title">Cluster Nodes — click to inject faults</div>
+    <div class="nodes-grid" id="nodesGrid"></div>
+  </div>
+
+  <!-- Right panel -->
+  <div class="right-panel">
+
+    <!-- Submit form -->
+    <div class="submit-panel">
+      <div class="section-title" style="margin-bottom:8px">Submit Job</div>
+      <div class="form-row">
+        <label>Priority</label>
+        <select id="selPriority">
+          <option value="0">Critical</option>
+          <option value="1">High</option>
+          <option value="2" selected>Normal</option>
+          <option value="3">Low</option>
+          <option value="4">Bulk</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>Class</label>
+        <select id="selClass">
+          <option value="0">α (Alpha)</option>
+          <option value="1">β (Beta)</option>
+          <option value="2">γ (Gamma)</option>
+          <option value="3">δ (Delta)</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>Cost</label>
+        <input type="range" id="sliderCost" min="0.5" max="5" step="0.5" value="1">
+        <span class="cost-display" id="costDisplay">1.0</span>
+      </div>
+      <div class="form-row" style="margin-top:4px">
+        <label></label>
+        <button class="primary" id="btnSubmit">Submit →</button>
+        <button id="btnSubmitRandom" title="Submit 10 random jobs">Burst ×10</button>
+      </div>
+      <!-- Auto Simulator -->
+      <div class="autosim-panel">
+        <div class="autosim-title">
+          <div class="autosim-dot" id="simDot"></div>
+          Auto Simulation
+        </div>
+        <div class="scenario-grid">
+          <button class="scenario-btn scenario-idle  active" data-scenario="idle">⏹ Idle</button>
+          <button class="scenario-btn scenario-steady"       data-scenario="steady">〜 Steady</button>
+          <button class="scenario-btn scenario-spike"        data-scenario="spike">⚡ Spike</button>
+          <button class="scenario-btn scenario-batch"        data-scenario="batch">📦 Batch</button>
+          <button class="scenario-btn scenario-rt"           data-scenario="rt">🚀 Real-time</button>
+          <button class="scenario-btn scenario-chaos"        data-scenario="chaos">💀 Chaos</button>
+        </div>
+        <div class="autosim-status" id="simStatus">Select a scenario to start the auto-simulation</div>
+        <div class="sparkline-wrap">
+          <canvas id="sparkline"></canvas>
+          <div class="sparkline-label">arrivals/s</div>
+          <div class="sparkline-peak" id="sparkPeak"></div>
+        </div>
+        <div class="fault-toggle-row">
+          <label>
+            <input type="checkbox" id="chkAutoFaults"> Auto-inject faults
+          </label>
+          <span id="faultStatus" style="font-family:var(--font-mono);color:var(--text2);margin-left:auto"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- AffinityMatrix heatmap -->
+    <div class="heatmap-panel">
+      <div class="section-title">AffinityMatrix Heatmap  <span style="color:var(--text2);font-weight:400;text-transform:none;letter-spacing:0">(node × job class learned multiplier)</span></div>
+      <div class="heatmap-container" style="margin-left:32px">
+        <div class="heatmap-labels-y" id="heatmapLabelsY"></div>
+        <canvas id="heatmap" width="288" height="160"></canvas>
+        <div class="heatmap-labels-x" id="heatmapLabelsX"></div>
+      </div>
+      <div class="heatmap-legend">
+        <span>fast ↑</span>
+        <div class="legend-gradient"></div>
+        <span>↑ slow</span>
+      </div>
+      <div style="font-size:10px;color:var(--text2);margin-top:4px">
+        Grey border = cold cell (&lt;5 obs). Number = learned multiplier.
+      </div>
+    </div>
+
+    <!-- Event log -->
+    <div class="event-log">
+      <div class="section-title" style="margin-bottom:6px">Event Log</div>
+      <div class="log-scroll" id="logScroll"></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── Tooltip (fault menu) ────────────────────────────────────────────── -->
+<div id="faultMenu" style="
+  display:none; position:fixed; background:var(--bg2);
+  border:1px solid var(--border); border-radius:var(--radius-lg);
+  padding:8px; z-index:100; box-shadow:0 8px 24px rgba(0,0,0,.5);
+  min-width:160px;
+">
+  <div style="font-size:11px;font-weight:600;color:var(--text1);padding:0 4px 6px;border-bottom:1px solid var(--border);margin-bottom:6px">
+    Node <span id="faultNodeLabel"></span> — Fault Injection
+  </div>
+  <div style="display:flex;flex-direction:column;gap:4px">
+    <button id="faultBtnCrash"    class="danger"  style="font-size:11px;text-align:left;padding:4px 8px">💥 Crash</button>
+    <button id="faultBtnSlowdown" style="font-size:11px;text-align:left;padding:4px 8px;color:var(--orange)">🐢 Slowdown ×5</button>
+    <button id="faultBtnRecover"  style="font-size:11px;text-align:left;padding:4px 8px;color:var(--green)">✅ Recover</button>
+    <button id="faultBtnClose"    style="font-size:11px;text-align:left;padding:4px 8px">Cancel</button>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+// ============================================================================
+// Constants — mirror the C++ enums exactly
+// ============================================================================
+
+const Priority = { Critical:0, High:1, Normal:2, Low:3, Bulk:4 };
+const PRIORITY_NAMES = ['Critical','High','Normal','Low','Bulk'];
+
+const NodeState = { Offline:0, Initializing:1, Idle:2, Busy:3, Overloaded:4, Draining:5, Failed:6, Recovering:7 };
+const STATE_CSS  = ['offline','offline','idle','busy','overloaded','draining','failed','recovering'];
+const STATE_NAMES = ['Offline','Initializing','Idle','Busy','Overloaded','Draining','Failed','Recovering'];
+
+// 4 job classes — same as C++ JobClass{0..3}
+const NUM_CLASSES  = 4;
+const CLASS_NAMES  = ['α','β','γ','δ'];
+const CLASS_FULL   = ['α (Alpha)','β (Beta)','γ (Gamma)','δ (Delta)'];
+
+// Admission table (matches C++ nodeAcceptsPriority)
+function nodeAcceptsPriority(state, priority) {
+  if (state === NodeState.Idle || state === NodeState.Busy)       return true;
+  if (state === NodeState.Overloaded || state === NodeState.Recovering) return priority <= 1;
+  if (state === NodeState.Draining)  return priority === 0;
+  return false; // Offline, Initializing, Failed
+}
+
+// Overloaded if queueDepth exceeds this fraction of maxQueue
+const OVERLOADED_THRESHOLD = 0.6;
+const MAX_QUEUE = 12;
+
+// ============================================================================
+// Hidden true multipliers — simulates real hardware variation.
+// The balancer never sees these; it learns them via the AffinityMatrix.
+//   Rows = nodes 0..3.  Columns = job classes α β γ δ.
+//   < 1.0 → node finishes this class faster than estimated
+//   > 1.0 → node finishes this class slower than estimated
+// ============================================================================
+const TRUE_MULTIPLIERS = [
+  [0.65, 1.45, 1.00, 1.80],   // Node 0: specialised for α; struggles with δ
+  [1.30, 0.60, 1.05, 0.85],   // Node 1: specialised for β
+  [0.90, 1.10, 0.52, 1.25],   // Node 2: specialised for γ
+  [1.55, 0.95, 1.40, 0.68],   // Node 3: specialised for δ
+];
+
+// ============================================================================
+// AffinityMatrix — JS port of include/balancer/AffinityMatrix.h
+// ============================================================================
+class AffinityMatrix {
+  constructor(maxNodes, maxClasses, alpha = 0.15, warmThreshold = 5) {
+    this.maxNodes      = maxNodes;
+    this.maxClasses    = maxClasses;
+    this.alpha         = alpha;
+    this.warmThreshold = warmThreshold;
+    this.values        = new Float32Array(maxNodes * maxClasses).fill(1.0);
+    this.observations  = new Uint32Array(maxNodes * maxClasses).fill(0);
+  }
+  _idx(nodeId, classId) {
+    return Math.min(nodeId, this.maxNodes-1) * this.maxClasses
+         + Math.min(classId, this.maxClasses-1);
+  }
+  get(nodeId, classId) {
+    const i = this._idx(nodeId, classId);
+    return this.observations[i] >= this.warmThreshold ? this.values[i] : 1.0;
+  }
+  isWarm(nodeId, classId) {
+    return this.observations[this._idx(nodeId, classId)] >= this.warmThreshold;
+  }
+  rawValue(nodeId, classId) {
+    return this.values[this._idx(nodeId, classId)];
+  }
+  obsCount(nodeId, classId) {
+    return this.observations[this._idx(nodeId, classId)];
+  }
+  update(nodeId, classId, ratio) {
+    const i     = this._idx(nodeId, classId);
+    const alpha = this.alpha;
+    this.observations[i]++;
+    this.values[i] = (1 - alpha) * this.values[i] + alpha * ratio;
+  }
+  reset() {
+    this.values.fill(1.0);
+    this.observations.fill(0);
+  }
+}
+
+// ============================================================================
+// Simulated Node
+// ============================================================================
+class SimNode {
+  constructor(id) {
+    this.id             = id;
+    this.state          = NodeState.Idle;
+    this.queueDepth     = 0;
+    this.completedJobs  = 0;
+    this.failedJobs     = 0;
+    this.multiplier     = 1.0;    // node-level EMA throughput multiplier
+    this.mulObs         = 0;
+    this.slowdownFactor = 1.0;    // injected fault slowdown
+    this.crashed        = false;
+    this.lastStateChange = Date.now();
+    this.recentLatencies = [];    // rolling window for p50/p99
+  }
+
+  get stateName() { return STATE_NAMES[this.state]; }
+
+  get utilization() {
+    return Math.min(1.0, this.queueDepth / MAX_QUEUE);
+  }
+
+  updateState() {
+    if (this.crashed) {
+      if (this.state !== NodeState.Failed) {
+        this.state = NodeState.Failed;
+        this.lastStateChange = Date.now();
+      }
+      return;
+    }
+    const prev = this.state;
+    if (this.queueDepth === 0) {
+      this.state = NodeState.Idle;
+    } else if (this.queueDepth < MAX_QUEUE * OVERLOADED_THRESHOLD) {
+      this.state = NodeState.Busy;
+    } else {
+      this.state = NodeState.Overloaded;
+    }
+    if (this.state !== prev) this.lastStateChange = Date.now();
+  }
+
+  addLatency(ms) {
+    this.recentLatencies.push(ms);
+    if (this.recentLatencies.length > 100) this.recentLatencies.shift();
+  }
+
+  get p50() {
+    if (!this.recentLatencies.length) return 0;
+    const s = [...this.recentLatencies].sort((a,b)=>a-b);
+    return Math.round(s[Math.floor(s.length * 0.5)]);
+  }
+
+  get p99() {
+    if (!this.recentLatencies.length) return 0;
+    const s = [...this.recentLatencies].sort((a,b)=>a-b);
+    return Math.round(s[Math.floor(s.length * 0.99)]);
+  }
+}
+
+// ============================================================================
+// Scheduling Policies — JS port of policies/*.h
+// ============================================================================
+const Policies = {};
+
+Policies.RoundRobin = (() => {
+  let cursor = 0;
+  return {
+    name: 'RoundRobin',
+    reset() { cursor = 0; },
+    selectNode(job, nodes, aff, balancer) {
+      const eligible = nodes.filter(n => nodeAcceptsPriority(n.state, job.priority));
+      if (!eligible.length) return null;
+      const node = eligible[cursor % eligible.length];
+      cursor++;
+      return node;
+    }
+  };
+})();
+
+Policies.LeastLoaded = {
+  name: 'LeastLoaded',
+  selectNode(job, nodes, aff, balancer) {
+    const eligible = nodes.filter(n => nodeAcceptsPriority(n.state, job.priority));
+    if (!eligible.length) return null;
+    return eligible.reduce((best, n) => {
+      // (queueDepth+1) base prevents all idle nodes scoring 0 and collapsing
+      // every dispatch onto node 0. Mirrors the C++ fix in LeastLoaded.h.
+      const loadN    = (n.queueDepth    + 1) * n.multiplier;
+      const loadBest = (best.queueDepth + 1) * best.multiplier;
+      return loadN < loadBest ? n : best;
+    });
+  }
+};
+
+Policies.AffinityRouting = {
+  name: 'AffinityRouting',
+  selectNode(job, nodes, aff, balancer) {
+    const eligible = nodes.filter(n => nodeAcceptsPriority(n.state, job.priority));
+    if (!eligible.length) return null;
+    return eligible.reduce((best, n) => {
+      // score = predict * (queueDepth+1) / affinity  — mirrors AffinityRouting.h
+      const qN    = n.queueDepth    + 1;
+      const qBest = best.queueDepth + 1;
+      const scoreN    = balancer.predict(job, n)    * qN    / aff.get(n.id,    job.jobClass);
+      const scoreBest = balancer.predict(job, best) * qBest / aff.get(best.id, job.jobClass);
+      return scoreN < scoreBest ? n : best;
+    });
+  }
+};
+
+Policies.WorkStealing = {
+  name: 'WorkStealing',
+  stealThreshold: 3,
+  selectNode(job, nodes, aff, balancer) {
+    const eligible = nodes.filter(n => nodeAcceptsPriority(n.state, job.priority));
+    if (!eligible.length) return null;
+    const underloaded = eligible.filter(n => n.queueDepth < this.stealThreshold);
+    const pool = underloaded.length ? underloaded : eligible;
+    return pool.reduce((best, n) => {
+      const sN    = balancer.predict(job, n) * (n.queueDepth + 1);
+      const sBest = balancer.predict(job, best) * (best.queueDepth + 1);
+      return sN < sBest ? n : best;
+    });
+  }
+};
+
+// ============================================================================
+// Balancer simulation
+// ============================================================================
+class Balancer {
+  constructor(nodes, policyName) {
+    this.nodes          = nodes;
+    this.affinity       = new AffinityMatrix(nodes.length, NUM_CLASSES);
+    this.policy         = Policies[policyName] || Policies.LeastLoaded;
+    this.policyName     = this.policy.name;
+    this.totalSubmitted = 0;
+    this.totalRejected  = 0;
+    this.inFlight       = 0;
+    this.jobCounter     = 1;
+    this.log            = [];
+    this.completedThisSec = 0;
+    this.throughput     = 0;
+    this._tps_reset     = Date.now();
+    this.isDraining     = false;
+    this._drainTimer    = null;
+  }
+
+  // Mirrors CostModel::predict() — execution cost only, no queue wait.
+  // Queue depth is factored in by each policy's scoring logic, not here.
+  predict(job, node) {
+    return job.estimatedCost
+         * node.multiplier
+         * this.affinity.get(node.id, job.jobClass);
+  }
+
+  submit(job) {
+    if (this.isDraining) {
+      this.totalRejected++;
+      return { ok: false, error: 'Draining' };
+    }
+
+    const selected = this.policy.selectNode(job, this.nodes, this.affinity, this);
+    if (!selected) {
+      this.totalRejected++;
+      this.addLog(`✗ Job rejected — no eligible node`, 'reject');
+      return { ok: false, error: 'ClusterSaturated' };
+    }
+
+    job.id       = this.jobCounter++;
+    job.nodeId   = selected.id;
+    job.submitted = performance.now();
+    this.totalSubmitted++;
+    this.inFlight++;
+
+    selected.queueDepth++;
+    selected.updateState();
+
+    // Compute true duration: estimatedCost × trueMultiplier × noise × slowdown
+    const trueMultiplier = TRUE_MULTIPLIERS[selected.id][job.jobClass];
+    const noise          = 0.65 + Math.random() * 0.70;
+    const slowdown       = selected.slowdownFactor;
+    const durationMs     = job.estimatedCost * trueMultiplier * noise * slowdown * 90;
+
+    this.addLog(
+      `→ #${job.id} [${CLASS_NAMES[job.jobClass]}][${PRIORITY_NAMES[job.priority]}] → N${selected.id} (est ${job.estimatedCost.toFixed(1)})`,
+      'submit'
+    );
+
+    setTimeout(() => this._onComplete(job, selected, durationMs), durationMs);
+    return { ok: true, jobId: job.id };
+  }
+
+  _onComplete(job, node, durationMs) {
+    if (node.crashed) {
+      node.failedJobs++;
+      this.inFlight = Math.max(0, this.inFlight - 1);
+      node.queueDepth = Math.max(0, node.queueDepth - 1);
+      this.addLog(`✗ #${job.id} [${CLASS_NAMES[job.jobClass]}] LOST on N${node.id} (node failed)`, 'fault');
+      return;
+    }
+
+    const observedCost = durationMs / 90;
+    const ratio        = observedCost / (job.estimatedCost || 1.0);
+
+    // AffinityMatrix update (EMA)
+    this.affinity.update(node.id, job.jobClass, ratio);
+
+    // Node-level EMA throughput multiplier (warm after 3 observations)
+    node.mulObs++;
+    if (node.mulObs >= 3) {
+      node.multiplier = 0.92 * node.multiplier + 0.08 * ratio;
+    }
+
+    node.queueDepth    = Math.max(0, node.queueDepth - 1);
+    node.completedJobs++;
+    node.addLatency(durationMs);
+    this.inFlight       = Math.max(0, this.inFlight - 1);
+    this.completedThisSec++;
+    node.updateState();
+
+    this.addLog(
+      `✓ #${job.id} [${CLASS_NAMES[job.jobClass]}] N${node.id} ${durationMs.toFixed(0)}ms ratio=${ratio.toFixed(2)}`,
+      'complete'
+    );
+  }
+
+  switchPolicy(name) {
+    if (!Policies[name]) return;
+    this.isDraining = true;
+    this.addLog(`⇄ Switching to ${name} (draining…)`, 'policy');
+    clearTimeout(this._drainTimer);
+    // Simulate drain: wait until inFlight drops near zero (max 3s), then swap
+    const trySwap = () => {
+      if (this.inFlight <= 1 || this._drainAttempts++ > 30) {
+        this.policy    = Policies[name];
+        this.policyName = name;
+        this.isDraining = false;
+        this._drainAttempts = 0;
+        this.addLog(`✓ Policy switched to ${name}`, 'policy');
+      } else {
+        this._drainTimer = setTimeout(trySwap, 100);
+      }
+    };
+    this._drainAttempts = 0;
+    this._drainTimer = setTimeout(trySwap, 100);
+  }
+
+  injectFault(nodeId, type) {
+    const node = this.nodes[nodeId];
+    if (!node) return;
+    if (type === 'crash') {
+      node.crashed        = true;
+      node.slowdownFactor = 1.0;
+      node.state          = NodeState.Failed;
+      node.lastStateChange = Date.now();
+      this.addLog(`💥 Node ${nodeId} CRASHED`, 'fault');
+    } else if (type === 'slowdown') {
+      node.crashed        = false;
+      node.slowdownFactor = 5.0;
+      node.updateState();
+      this.addLog(`🐢 Node ${nodeId} SLOWDOWN ×5`, 'fault');
+    } else if (type === 'recover') {
+      node.crashed        = false;
+      node.slowdownFactor = 1.0;
+      node.updateState();
+      this.addLog(`✅ Node ${nodeId} recovered`, 'fault');
+    }
+  }
+
+  addLog(msg, type) {
+    const now = new Date();
+    const ts  = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}.${String(now.getMilliseconds()).padStart(3,'0').slice(0,2)}`;
+    this.log.unshift({ msg, type, ts });
+    if (this.log.length > 80) this.log.pop();
+  }
+
+  tickThroughput() {
+    const now  = Date.now();
+    const elapsed = (now - this._tps_reset) / 1000;
+    if (elapsed >= 1.0) {
+      this.throughput       = this.completedThisSec / elapsed;
+      this.completedThisSec = 0;
+      this._tps_reset       = now;
+    }
+  }
+}
+
+// ============================================================================
+// Application state
+// ============================================================================
+
+const NUM_NODES    = 4;
+let nodes    = Array.from({ length: NUM_NODES }, (_, i) => new SimNode(i));
+let balancer = new Balancer(nodes, 'LeastLoaded');
+
+
+// ============================================================================
+// AutoSimulator — realistic workload generation
+// ============================================================================
+
+// Poisson variate via Knuth's method (λ ≤ ~700)
+function poissonVariate(lambda) {
+  if (lambda <= 0) return 0;
+  const L = Math.exp(-lambda);
+  let k = 0, p = 1;
+  do { k++; p *= Math.random(); } while (p > L);
+  return k - 1;
+}
+
+// Weighted random pick from [{weight, value}]
+function weightedPick(items) {
+  const total = items.reduce((s, x) => s + x.weight, 0);
+  let r = Math.random() * total;
+  for (const item of items) {
+    r -= item.weight;
+    if (r <= 0) return item.value;
+  }
+  return items[items.length - 1].value;
+}
+
+// ── Scenario definitions ──────────────────────────────────────────────────
+// Each scenario has:
+//   rate()         → current arrivals/second (Poisson λ)
+//   jobProfile()   → {priority, jobClass, estimatedCost}
+//   description()  → status string shown in UI
+//   tick(dt)       → called each scheduler tick to advance internal state
+// ─────────────────────────────────────────────────────────────────────────
+
+const SCENARIOS = {
+
+  idle: {
+    label: '⏹ Idle',
+    _rate: 0,
+    rate()        { return 0; },
+    jobProfile()  { return null; },
+    description() { return 'Simulation paused.'; },
+    tick()        {},
+    reset()       {},
+  },
+
+  steady: {
+    label: '〜 Steady',
+    _baseRate: 3.5,
+    rate()        { return this._baseRate; },
+    jobProfile()  {
+      return {
+        priority:      weightedPick([{weight:5,value:0},{weight:10,value:1},{weight:50,value:2},{weight:25,value:3},{weight:10,value:4}]),
+        jobClass:      weightedPick([{weight:25,value:0},{weight:25,value:1},{weight:25,value:2},{weight:25,value:3}]),
+        estimatedCost: 0.5 + Math.random() * 2.5,
+      };
+    },
+    description() {
+      return `<span class="hi">Steady load</span> — λ=${this._baseRate.toFixed(1)}/s, balanced job mix`;
+    },
+    tick()  {},
+    reset() {},
+  },
+
+  spike: {
+    label: '⚡ Spike',
+    _t: 0,
+    _phase: 'lull',   // lull | ramp | peak | drain
+    _phaseTimer: 0,
+    _currentRate: 1.5,
+    _phaseDurations: { lull: 8000, ramp: 3000, peak: 6000, drain: 4000 },
+    _phases: ['lull','ramp','peak','drain'],
+    rate()        { return this._currentRate; },
+    tick(dt) {
+      this._phaseTimer += dt;
+      const dur = this._phaseDurations[this._phase];
+      if (this._phaseTimer >= dur) {
+        this._phaseTimer = 0;
+        const idx = this._phases.indexOf(this._phase);
+        this._phase = this._phases[(idx+1) % this._phases.length];
+      }
+      if      (this._phase === 'lull')  this._currentRate = 1.5;
+      else if (this._phase === 'ramp')  this._currentRate = 1.5 + 13.5 * (this._phaseTimer / this._phaseDurations.ramp);
+      else if (this._phase === 'peak')  this._currentRate = 15.0;
+      else if (this._phase === 'drain') this._currentRate = 15.0 - 13.5 * (this._phaseTimer / this._phaseDurations.drain);
+    },
+    jobProfile() {
+      const hotClass = this._phase === 'peak' ? 0 : Math.floor(Math.random()*4); // spike hammers α
+      const priority = this._phase === 'peak'
+        ? weightedPick([{weight:30,value:0},{weight:40,value:1},{weight:30,value:2}])
+        : weightedPick([{weight:5,value:0},{weight:15,value:1},{weight:50,value:2},{weight:20,value:3},{weight:10,value:4}]);
+      return { priority, jobClass: hotClass, estimatedCost: 0.5 + Math.random() * 3 };
+    },
+    description() {
+      const remaining = Math.ceil((this._phaseDurations[this._phase] - this._phaseTimer) / 1000);
+      const phaseColor = {lull:'hi',ramp:'warn',peak:'warn',drain:'hi'}[this._phase];
+      return `<span class="${phaseColor}">⚡ ${this._phase.toUpperCase()}</span> — λ=${this._currentRate.toFixed(1)}/s | next phase in ${remaining}s`;
+    },
+    reset() { this._t=0; this._phase='lull'; this._phaseTimer=0; this._currentRate=1.5; },
+  },
+
+  batch: {
+    label: '📦 Batch',
+    _wave: 0,
+    _waveTimer: 0,
+    _waveDuration: 12000,
+    _betweenDuration: 5000,
+    _inWave: false,
+    rate()        { return this._inWave ? 8.0 : 0.4; },
+    tick(dt) {
+      this._waveTimer += dt;
+      const dur = this._inWave ? this._waveDuration : this._betweenDuration;
+      if (this._waveTimer >= dur) {
+        this._waveTimer = 0;
+        this._inWave = !this._inWave;
+        if (this._inWave) this._wave++;
+      }
+    },
+    jobProfile() {
+      return {
+        priority:      weightedPick([{weight:5,value:3},{weight:80,value:4},{weight:15,value:2}]),  // mostly Bulk/Low
+        jobClass:      weightedPick([{weight:10,value:0},{weight:10,value:1},{weight:40,value:2},{weight:40,value:3}]),  // γ/δ heavy
+        estimatedCost: 1.5 + Math.random() * 3.5,   // bigger jobs
+      };
+    },
+    description() {
+      const remaining = Math.ceil((( this._inWave ? this._waveDuration : this._betweenDuration) - this._waveTimer) / 1000);
+      return this._inWave
+        ? `<span class="warn">📦 Batch wave #${this._wave}</span> — λ=8/s heavy γ/δ jobs | ${remaining}s left`
+        : `<span class="hi">📦 Between waves</span> — next batch in ${remaining}s`;
+    },
+    reset() { this._wave=0; this._waveTimer=0; this._inWave=false; },
+  },
+
+  rt: {
+    label: '🚀 Real-time',
+    _burstTimer: 0,
+    _burstDuration: 2500,
+    _coolDuration: 1500,
+    _inBurst: false,
+    _burstCount: 0,
+    rate()   { return this._inBurst ? 12.0 : 3.0; },
+    tick(dt) {
+      this._burstTimer += dt;
+      const dur = this._inBurst ? this._burstDuration : this._coolDuration;
+      if (this._burstTimer >= dur) {
+        this._burstTimer = 0;
+        this._inBurst = !this._inBurst;
+        if (this._inBurst) this._burstCount++;
+      }
+    },
+    jobProfile() {
+      return {
+        priority:      weightedPick([{weight:30,value:0},{weight:40,value:1},{weight:25,value:2},{weight:5,value:3}]),
+        jobClass:      weightedPick([{weight:50,value:0},{weight:30,value:1},{weight:15,value:2},{weight:5,value:3}]),  // α dominant
+        estimatedCost: 0.5 + Math.random() * 1.5,  // small fast jobs
+      };
+    },
+    description() {
+      const remaining = Math.ceil(((this._inBurst ? this._burstDuration : this._coolDuration) - this._burstTimer) / 1000);
+      return this._inBurst
+        ? `<span class="good">🚀 RT burst #${this._burstCount}</span> — λ=12/s high-priority α | ${remaining}s`
+        : `<span class="hi">🚀 Cooling down</span> — next burst in ${remaining}s`;
+    },
+    reset() { this._burstTimer=0; this._inBurst=false; this._burstCount=0; },
+  },
+
+  chaos: {
+    label: '💀 Chaos',
+    _rate: 5,
+    _rateTimer: 0,
+    _rateChangePeriod: 3000,
+    rate()   { return this._rate; },
+    tick(dt) {
+      this._rateTimer += dt;
+      if (this._rateTimer >= this._rateChangePeriod) {
+        this._rateTimer = 0;
+        this._rateChangePeriod = 1500 + Math.random() * 4000;
+        this._rate = 0.5 + Math.random() * 14;
+      }
+    },
+    jobProfile() {
+      return {
+        priority:      Math.floor(Math.random() * 5),
+        jobClass:      Math.floor(Math.random() * 4),
+        estimatedCost: 0.5 + Math.random() * 4.5,
+      };
+    },
+    description() {
+      return `<span style="color:var(--red)">💀 Chaos</span> — λ=${this._rate.toFixed(1)}/s | random rate, auto-faults active`;
+    },
+    reset() { this._rate=5; this._rateTimer=0; this._rateChangePeriod=3000; },
+  },
+};
+
+// ── AutoSimulator engine ──────────────────────────────────────────────────
+
+class AutoSimulator {
+  constructor() {
+    this.scenario       = 'idle';
+    this._active        = false;
+    this._lastTick      = 0;
+    this._accumMs       = 0;     // fractional job accumulator
+    this._autoFaults    = false;
+    this._faultTimer    = 0;
+    this._faultInterval = 12000 + Math.random() * 8000;
+    this._faultNodeCycle = 0;
+
+    // Sparkline: 60 buckets of 1s each
+    this._sparkHistory  = new Float32Array(60).fill(0);
+    this._sparkBucket   = 0;
+    this._sparkTimer    = 0;
+    this._sparkCurrent  = 0;  // jobs arrived in current bucket
+  }
+
+  get isRunning() { return this._active; }
+
+  setScenario(name) {
+    if (!SCENARIOS[name]) return;
+    this.scenario = name;
+    SCENARIOS[name].reset?.();
+    this._active = (name !== 'idle');
+    this._lastTick = performance.now();
+    this._accumMs  = 0;
+  }
+
+  setAutoFaults(enabled) { this._autoFaults = enabled; }
+
+  // Called every animation frame
+  tick(nowMs) {
+    if (!this._active) return;
+
+    const dt = Math.min(nowMs - this._lastTick, 250);  // cap at 250ms to avoid spiral
+    this._lastTick = nowMs;
+
+    const sc = SCENARIOS[this.scenario];
+    sc.tick(dt);
+
+    const lambda = sc.rate();
+
+    // Poisson arrivals: λ*dt/1000 expected jobs per tick
+    if (lambda > 0) {
+      this._accumMs += dt;
+      // emit jobs in 50ms mini-buckets to smooth bursts
+      while (this._accumMs >= 50) {
+        this._accumMs -= 50;
+        const expected = lambda * 0.05;
+        const count    = poissonVariate(expected);
+        for (let i = 0; i < count; i++) {
+          const profile = sc.jobProfile();
+          if (profile) {
+            balancer.submit(profile);
+            this._sparkCurrent++;
+          }
+        }
+      }
+    }
+
+    // Sparkline bucket: advance every 1s
+    this._sparkTimer += dt;
+    if (this._sparkTimer >= 1000) {
+      this._sparkTimer -= 1000;
+      this._sparkHistory[this._sparkBucket % 60] = this._sparkCurrent;
+      this._sparkBucket++;
+      this._sparkCurrent = 0;
+    }
+
+    // Auto fault injection (chaos always; others only if checkbox enabled)
+    if (this._autoFaults || this.scenario === 'chaos') {
+      this._faultTimer += dt;
+      if (this._faultTimer >= this._faultInterval) {
+        this._faultTimer = 0;
+        this._faultInterval = 8000 + Math.random() * 12000;
+        this._injectAutoFault();
+      }
+    }
+  }
+
+  _injectAutoFault() {
+    const ni = this._faultNodeCycle % NUM_NODES;
+    this._faultNodeCycle++;
+    const node = nodes[ni];
+    if (!node) return;
+
+    // Rotate: crash → recover → slowdown → recover
+    const action = (this._faultNodeCycle % 3 === 0) ? 'crash'
+                 : (this._faultNodeCycle % 3 === 1) ? 'recover'
+                 : 'slowdown';
+    balancer.injectFault(ni, action);
+
+    // Auto-recover crashes after a delay
+    if (action === 'crash') {
+      setTimeout(() => {
+        if (nodes[ni].crashed) {
+          balancer.injectFault(ni, 'recover');
+          updateFaultStatus(`auto-recovered N${ni}`);
+        }
+      }, 4000 + Math.random() * 4000);
+    }
+
+    updateFaultStatus(`${action} N${ni}`);
+  }
+
+  getSparkHistory() {
+    // Return ordered array from oldest to newest
+    const arr = [];
+    const len = Math.min(this._sparkBucket, 60);
+    for (let i = len - 1; i >= 0; i--) {
+      arr.unshift(this._sparkHistory[(this._sparkBucket - 1 - i) % 60]);
+    }
+    // Pad to 60
+    while (arr.length < 60) arr.unshift(0);
+    return arr;
+  }
+}
+
+const autoSim = new AutoSimulator();
+
+function updateFaultStatus(msg) {
+  const el = document.getElementById('faultStatus');
+  if (el) { el.textContent = msg; setTimeout(() => { if(el.textContent===msg) el.textContent=''; }, 3000); }
+}
+
+// ============================================================================
+// Sparkline renderer
+// ============================================================================
+
+function renderSparkline() {
+  const canvas = document.getElementById('sparkline');
+  if (!canvas) return;
+  const W = canvas.offsetWidth;
+  const H = canvas.offsetHeight;
+  if (!W || !H) return;
+  canvas.width  = W;
+  canvas.height = H;
+
+  const ctx  = canvas.getContext('2d');
+  const data = autoSim.getSparkHistory();
+  const peak = Math.max(...data, 1);
+
+  ctx.clearRect(0, 0, W, H);
+
+  const barW = W / data.length;
+
+  // Fill area
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  const sc = SCENARIOS[autoSim.scenario];
+  const col = autoSim.scenario === 'chaos' ? '248,81,73'
+            : autoSim.scenario === 'spike'  ? '240,136,62'
+            : autoSim.scenario === 'batch'  ? '210,153,34'
+            : autoSim.scenario === 'rt'     ? '63,185,80'
+            : '88,166,255';
+  grad.addColorStop(0, `rgba(${col},0.5)`);
+  grad.addColorStop(1, `rgba(${col},0.02)`);
+
+  ctx.beginPath();
+  ctx.moveTo(0, H);
+  for (let i = 0; i < data.length; i++) {
+    const x = i * barW;
+    const y = H - (data[i] / peak) * (H - 4);
+    if (i === 0) ctx.lineTo(x, y);
+    else ctx.lineTo(x + barW * 0.5, y);
+  }
+  ctx.lineTo(W, H);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Line
+  ctx.beginPath();
+  ctx.strokeStyle = `rgb(${col})`;
+  ctx.lineWidth   = 1.5;
+  ctx.lineJoin    = 'round';
+  for (let i = 0; i < data.length; i++) {
+    const x = i * barW + barW * 0.5;
+    const y = H - (data[i] / peak) * (H - 4);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Peak label
+  const peakEl = document.getElementById('sparkPeak');
+  if (peakEl) peakEl.textContent = `peak ${peak.toFixed(0)}/s`;
+}
+
+// ============================================================================
+// AutoSim UI updates
+// ============================================================================
+
+function renderAutoSimUI() {
+  const dot    = document.getElementById('simDot');
+  const status = document.getElementById('simStatus');
+  if (!dot || !status) return;
+
+  dot.className = 'autosim-dot' + (autoSim.isRunning ? ' running' : '');
+
+  const sc = SCENARIOS[autoSim.scenario];
+  status.innerHTML = sc ? sc.description() : '';
+}
+
+// Scenario button wiring
+document.querySelectorAll('.scenario-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.scenario-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    autoSim.setScenario(btn.dataset.scenario);
+  });
+});
+
+document.getElementById('chkAutoFaults').addEventListener('change', e => {
+  autoSim.setAutoFaults(e.target.checked);
+});
+let wasmBackend = null;
+
+(function tryLoadWasm() {
+  if (typeof BalancerModule !== 'undefined') {
+    BalancerModule().then(m => {
+      wasmBackend = new m.BalancerDemo(NUM_NODES, NUM_CLASSES);
+      balancer.addLog('⚡ WASM backend loaded — using compiled C++', 'policy');
+    }).catch(() => { /* Fall through to JS simulation */ });
+  }
+})();
+
+// ============================================================================
+// UI helpers
+// ============================================================================
+
+function utilColor(util) {
+  if (util < 0.5) return `hsl(${142 - util * 60},60%,45%)`;
+  if (util < 0.8) return `hsl(${82 - (util-0.5)*200},60%,45%)`;
+  return `hsl(${-18},70%,52%)`;
+}
+
+function stateColor(state) {
+  const c = ['#484f58','#484f58','#3fb950','#58a6ff','#f0883e','#d29922','#f85149','#bc8cff'];
+  return c[state] || '#484f58';
+}
+
+// Heatmap: map multiplier [0.4, 1.8] → color
+// 0.4 → blue (fast), 1.0 → neutral grey, 1.8 → red (slow)
+function multiplierColor(v, warm) {
+  if (!warm) return '#2d333b';  // cold: dark grey
+  const t = (v - 1.0);
+  if (t < 0) {
+    // fast: blue range
+    const intensity = Math.min(1, -t / 0.6);
+    const r = Math.round(30  + (1-intensity)*30);
+    const g = Math.round(80  + (1-intensity)*40);
+    const b = Math.round(200 + intensity*55);
+    return `rgb(${r},${g},${b})`;
+  } else {
+    // slow: red range
+    const intensity = Math.min(1, t / 0.8);
+    const r = Math.round(180 + intensity*75);
+    const g = Math.round(60  - intensity*30);
+    const b = Math.round(50  - intensity*20);
+    return `rgb(${r},${g},${b})`;
+  }
+}
+
+// ============================================================================
+// Render: node cards
+// ============================================================================
+
+function buildNodeCards() {
+  const grid = document.getElementById('nodesGrid');
+  grid.innerHTML = '';
+  for (const node of nodes) {
+    const card = document.createElement('div');
+    card.className = 'node-card';
+    card.id = `node-card-${node.id}`;
+    card.addEventListener('click', e => openFaultMenu(node.id, e));
+    grid.appendChild(card);
+  }
+}
+
+function renderNodeCards() {
+  for (const node of nodes) {
+    const card = document.getElementById(`node-card-${node.id}`);
+    if (!card) continue;
+
+    const state    = node.state;
+    const cssState = STATE_CSS[state];
+    card.className = `node-card${node.crashed ? ' failed' : state === NodeState.Overloaded ? ' overloaded' : ''}`;
+
+    const util   = node.utilization;
+    const fillW  = (util * 100).toFixed(1);
+    const fillC  = utilColor(util);
+
+    // Queue slots (max 12)
+    let slots = '';
+    for (let s = 0; s < 12; s++) {
+      const occ = s < node.queueDepth;
+      slots += `<div class="slot${occ ? ' occupied' : ''}"></div>`;
+    }
+
+    card.innerHTML = `
+      <div class="node-header">
+        <div class="node-id">Node ${node.id}</div>
+        <div class="state-badge state-${cssState}">${STATE_NAMES[state]}</div>
+      </div>
+      <div class="util-bar-wrap">
+        <div class="util-bar-label">
+          <span>Utilization</span>
+          <span>${(util*100).toFixed(0)}%</span>
+        </div>
+        <div class="util-bar-track">
+          <div class="util-bar-fill" style="width:${fillW}%;background:${fillC}"></div>
+        </div>
+      </div>
+      <div class="queue-slots">${slots}</div>
+      <div class="node-stats">
+        <div class="node-stat">Queue: <span>${node.queueDepth}</span></div>
+        <div class="node-stat">Done: <span>${node.completedJobs}</span></div>
+        <div class="node-stat">Multiplier: <span>${node.multiplier.toFixed(3)}</span></div>
+        <div class="node-stat">p50: <span>${node.p50}ms</span></div>
+        ${node.slowdownFactor > 1 ? `<div class="node-stat" style="color:var(--orange)">Slowdown: <span>×${node.slowdownFactor}</span></div>` : ''}
+        ${node.crashed ? `<div class="node-stat" style="color:var(--red)">Status: <span>FAILED</span></div>` : ''}
+      </div>`;
+  }
+}
+
+// ============================================================================
+// Render: heatmap
+// ============================================================================
+
+function buildHeatmapLabels() {
+  const labX = document.getElementById('heatmapLabelsX');
+  const labY = document.getElementById('heatmapLabelsY');
+  labX.innerHTML = CLASS_NAMES.map(c => `<span>${c}</span>`).join('');
+  labY.innerHTML = nodes.map(n => `<span>N${n.id}</span>`).join('');
+}
+
+function renderHeatmap() {
+  const canvas  = document.getElementById('heatmap');
+  const ctx     = canvas.getContext('2d');
+  const rows    = nodes.length;
+  const cols    = NUM_CLASSES;
+  const W       = canvas.width;
+  const H       = canvas.height;
+  const cellW   = W / cols;
+  const cellH   = H / rows;
+  const aff     = balancer.affinity;
+
+  ctx.clearRect(0, 0, W, H);
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const warm = aff.isWarm(r, c);
+      const val  = warm ? aff.rawValue(r, c) : 1.0;
+      const x    = c * cellW;
+      const y    = r * cellH;
+
+      // Cell fill
+      ctx.fillStyle = multiplierColor(val, warm);
+      ctx.fillRect(x + 1, y + 1, cellW - 2, cellH - 2);
+
+      // Cell border
+      ctx.strokeStyle = warm ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.04)';
+      ctx.lineWidth   = 1;
+      ctx.strokeRect(x + 0.5, y + 0.5, cellW - 1, cellH - 1);
+
+      // Value label
+      const obs  = aff.obsCount(r, c);
+      ctx.fillStyle   = warm ? 'rgba(230,237,243,0.85)' : 'rgba(139,148,158,0.5)';
+      ctx.font        = `bold ${Math.floor(cellH * 0.3)}px SFMono-Regular, monospace`;
+      ctx.textAlign   = 'center';
+      ctx.textBaseline= 'middle';
+      ctx.fillText(warm ? val.toFixed(2) : '—', x + cellW/2, y + cellH/2 - cellH*0.06);
+
+      // Obs count sub-label
+      ctx.font      = `${Math.floor(cellH * 0.2)}px SFMono-Regular, monospace`;
+      ctx.fillStyle = 'rgba(139,148,158,0.6)';
+      ctx.fillText(`${obs}`, x + cellW/2, y + cellH/2 + cellH*0.23);
+    }
+  }
+
+  // True-multiplier overlay hint (faint, bottom-right of each cell)
+  ctx.font      = `${Math.floor(cellH * 0.16)}px monospace`;
+  ctx.fillStyle = 'rgba(255,255,255,0.12)';
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      ctx.textAlign    = 'right';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(`t=${TRUE_MULTIPLIERS[r][c]}`,
+        (c+1)*cellW - 3, (r+1)*cellH - 2);
+    }
+  }
+}
+
+// ============================================================================
+// Render: header stats + event log
+// ============================================================================
+
+function renderStats() {
+  document.getElementById('valSubmitted').textContent  = balancer.totalSubmitted;
+  document.getElementById('valInFlight').textContent   = balancer.inFlight;
+  document.getElementById('valThroughput').textContent = balancer.throughput.toFixed(1);
+  document.getElementById('valPolicy').textContent     = balancer.policyName;
+  document.getElementById('statDraining').style.display = balancer.isDraining ? '' : 'none';
+}
+
+let lastLogLength = 0;
+
+function renderLog() {
+  if (balancer.log.length === lastLogLength) return;
+  lastLogLength = balancer.log.length;
+  const scroll = document.getElementById('logScroll');
+
+  // Prepend new entries only
+  const toAdd = balancer.log.slice(0, balancer.log.length - scroll.childElementCount);
+  for (let i = toAdd.length - 1; i >= 0; i--) {
+    const entry = toAdd[i];
+    const div   = document.createElement('div');
+    div.className = `log-entry log-${entry.type}`;
+    div.innerHTML  = `<span class="log-time">${entry.ts}</span><span class="log-msg">${entry.msg}</span>`;
+    scroll.insertBefore(div, scroll.firstChild);
+  }
+
+  // Trim old entries beyond 80
+  while (scroll.childElementCount > 80) scroll.removeChild(scroll.lastChild);
+}
+
+// ============================================================================
+// Event handlers
+// ============================================================================
+
+document.getElementById('sliderCost').addEventListener('input', e => {
+  document.getElementById('costDisplay').textContent = parseFloat(e.target.value).toFixed(1);
+});
+
+document.getElementById('btnSubmit').addEventListener('click', () => {
+  const priority  = parseInt(document.getElementById('selPriority').value);
+  const jobClass  = parseInt(document.getElementById('selClass').value);
+  const cost      = parseFloat(document.getElementById('sliderCost').value);
+  balancer.submit({ priority, jobClass, estimatedCost: cost });
+});
+
+document.getElementById('btnSubmitRandom').addEventListener('click', () => {
+  for (let i = 0; i < 10; i++) submitRandom();
+});
+
+document.getElementById('btnSwitchPolicy').addEventListener('click', () => {
+  const name = document.getElementById('policySelect').value;
+  balancer.switchPolicy(name);
+});
+
+document.getElementById('btnReset').addEventListener('click', () => {
+  autoSim.setScenario('idle');
+  document.querySelectorAll('.scenario-btn').forEach(b => b.classList.remove('active'));
+  document.querySelector('.scenario-btn[data-scenario="idle"]').classList.add('active');
+  nodes    = Array.from({ length: NUM_NODES }, (_, i) => new SimNode(i));
+  balancer = new Balancer(nodes, document.getElementById('policySelect').value);
+  lastLogLength = 0;
+  document.getElementById('logScroll').innerHTML = '';
+  buildNodeCards();
+  buildHeatmapLabels();
+  balancer.addLog('↺ Simulation reset', 'policy');
+});
+
+// submitRandom kept for the Burst ×10 button
+function submitRandom() {
+  const sc = SCENARIOS[autoSim.scenario];
+  let profile;
+  if (autoSim.isRunning && sc && sc.jobProfile) {
+    profile = sc.jobProfile();
+  } else {
+    profile = {
+      priority:      weightedPick([{weight:5,value:0},{weight:10,value:1},{weight:50,value:2},{weight:25,value:3},{weight:10,value:4}]),
+      jobClass:      Math.floor(Math.random() * NUM_CLASSES),
+      estimatedCost: 0.5 + Math.random() * 4,
+    };
+  }
+  if (profile) balancer.submit(profile);
+}
+
+// ============================================================================
+// Fault menu
+// ============================================================================
+
+function openFaultMenu(nodeId, evt) {
+  selectedNodeForFault = nodeId;
+  const menu = document.getElementById('faultMenu');
+  document.getElementById('faultNodeLabel').textContent = nodeId;
+  menu.style.display = 'block';
+  const x = Math.min(evt.clientX, window.innerWidth  - 180);
+  const y = Math.min(evt.clientY, window.innerHeight - 200);
+  menu.style.left = x + 'px';
+  menu.style.top  = y + 'px';
+}
+
+document.getElementById('faultBtnCrash').addEventListener('click', () => {
+  balancer.injectFault(selectedNodeForFault, 'crash');
+  document.getElementById('faultMenu').style.display = 'none';
+});
+document.getElementById('faultBtnSlowdown').addEventListener('click', () => {
+  balancer.injectFault(selectedNodeForFault, 'slowdown');
+  document.getElementById('faultMenu').style.display = 'none';
+});
+document.getElementById('faultBtnRecover').addEventListener('click', () => {
+  balancer.injectFault(selectedNodeForFault, 'recover');
+  document.getElementById('faultMenu').style.display = 'none';
+});
+document.getElementById('faultBtnClose').addEventListener('click', () => {
+  document.getElementById('faultMenu').style.display = 'none';
+});
+document.addEventListener('click', e => {
+  const menu = document.getElementById('faultMenu');
+  if (!menu.contains(e.target) && !e.target.closest('.node-card')) {
+    menu.style.display = 'none';
+  }
+});
+
+// ============================================================================
+// Main render loop (requestAnimationFrame, throttled to ~15 fps)
+// ============================================================================
+
+let lastRenderTime = 0;
+
+function renderLoop(ts) {
+  requestAnimationFrame(renderLoop);
+
+  // Tick autoSim every frame (it handles its own dt)
+  autoSim.tick(ts);
+
+  if (ts - lastRenderTime < 66) return;   // ~15 fps for UI
+  lastRenderTime = ts;
+
+  balancer.tickThroughput();
+  renderNodeCards();
+  renderHeatmap();
+  renderStats();
+  renderLog();
+  renderSparkline();
+  renderAutoSimUI();
+}
+
+// ============================================================================
+// Boot
+// ============================================================================
+
+buildNodeCards();
+buildHeatmapLabels();
+balancer.addLog('fatp-balancer Phase 6 demo started — JS simulation active', 'policy');
+balancer.addLog('Tip: pick a scenario above to start the auto-simulation', 'policy');
+balancer.addLog('Tip: try AffinityRouting with Real-time to watch the heatmap converge', 'policy');
+
+// Seed a few jobs so the heatmap isn\'t cold
+for (let i = 0; i < 6; i++) submitRandom();
+
+requestAnimationFrame(renderLoop);
+</script>
+</body>
+</html>
