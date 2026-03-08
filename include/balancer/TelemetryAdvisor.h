@@ -309,3 +309,7 @@ private:
 };
 
 } // namespace balancer
+
+#include "balancer/AdvisorConcept.h"
+static_assert(balancer::Advisor<balancer::TelemetryAdvisor>,
+    "TelemetryAdvisor must satisfy the Advisor concept");

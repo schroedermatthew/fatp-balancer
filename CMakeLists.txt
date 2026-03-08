@@ -224,6 +224,10 @@ balancer_add_test(test_NNAdvisor_HeaderSelfContained
 balancer_add_test(test_nn_advisor
     tests/test_nn_advisor.cpp)
 
+# AdvisorConcept — C++20 concept for advisor types
+balancer_add_test(test_AdvisorConcept_HeaderSelfContained
+    tests/test_AdvisorConcept_HeaderSelfContained.cpp)
+
 # Phase 7 Step 6.6 — Telemetry integration (wiring + JSON panel)
 balancer_add_test(test_telemetry_integration
     tests/test_telemetry_integration.cpp)
