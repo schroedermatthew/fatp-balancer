@@ -40,9 +40,6 @@ target_include_directories(balancer_headers INTERFACE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/policies
     ${CMAKE_SOURCE_DIR}
-)
-# FatP headers are upstream — treat as system includes to suppress their warnings.
-target_include_directories(balancer_headers SYSTEM INTERFACE
     ${FATP_INCLUDE_DIR}
 )
 target_compile_features(balancer_headers INTERFACE cxx_std_20)

@@ -106,9 +106,9 @@ FATP_TEST_CASE(fifo_within_same_priority)
     (void)hq.enqueue(j2, nop);
     (void)hq.enqueue(j3, nop);
 
-    FATP_ASSERT_EQ(hq.tryDequeue()->job.estimatedCost.units, uint64_t{1}, "FIFO: j1 first");
-    FATP_ASSERT_EQ(hq.tryDequeue()->job.estimatedCost.units, uint64_t{2}, "FIFO: j2 second");
-    FATP_ASSERT_EQ(hq.tryDequeue()->job.estimatedCost.units, uint64_t{3}, "FIFO: j3 third");
+    auto e1 = hq.tryDequeue(); FATP_ASSERT_TRUE(e1.has_value(), "j1 must dequeue"); FATP_ASSERT_EQ(e1->job.estimatedCost.units, uint64_t{1}, "FIFO: j1 first");
+    auto e2 = hq.tryDequeue(); FATP_ASSERT_TRUE(e2.has_value(), "j2 must dequeue"); FATP_ASSERT_EQ(e2->job.estimatedCost.units, uint64_t{2}, "FIFO: j2 second");
+    auto e3 = hq.tryDequeue(); FATP_ASSERT_TRUE(e3.has_value(), "j3 must dequeue"); FATP_ASSERT_EQ(e3->job.estimatedCost.units, uint64_t{3}, "FIFO: j3 third");
     return true;
 }
 
