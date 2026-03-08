@@ -64,11 +64,11 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Linux Clang: C++20 (Clang 16) + C++23 forward-compat (Clang 17)
-  # ubuntu-22.04 used — Clang 16/17 available in default repos
+  # Clang 16/17 not in ubuntu default repos — install via LLVM apt repository
   # ---------------------------------------------------------------------------
   linux-clang:
     name: Linux Clang ${{ matrix.version }} C++${{ matrix.std }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -85,7 +85,11 @@ jobs:
           path: FatP
 
       - name: Install Clang
-        run: sudo apt-get install -y clang-${{ matrix.version }}
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-${{ matrix.version }} main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update -q
+          sudo apt-get install -y clang-${{ matrix.version }}
 
       - name: Configure
         run: |
@@ -261,7 +265,7 @@ jobs:
             echo "Checking $header..."
             echo "#include \"$header\"" > /tmp/check.cpp
             echo "int main() { return 0; }" >> /tmp/check.cpp
-            if ! g++-13 -std=c++20 -I./include -I./policies \
+            if ! g++-13 -std=c++20 -I. -I./include -I./policies \
                 -I./FatP/include/fat_p /tmp/check.cpp -o /dev/null 2>&1; then
               echo "FAILED: $header"
               failed=1
