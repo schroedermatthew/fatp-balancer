@@ -584,8 +584,7 @@ private:
         {
             newState = balancer::NodeState::Overloaded;
         }
-        else if (depth > 0 ||
-                 (mThreadPool && mThreadPool->active_tasks() > 0))
+        else if (depth > 0)
         {
             if (mState == balancer::NodeState::Overloaded &&
                 depth > mConfig.recoverThreshold)
