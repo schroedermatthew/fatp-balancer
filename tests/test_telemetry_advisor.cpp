@@ -90,6 +90,9 @@ inline ClusterMetrics makeMetrics(uint32_t activeNodes,
     ClusterMetrics m;
     m.activeNodes      = activeNodes;
     m.unavailableNodes = unavailableNodes;
+    // knownNodes = stable-state nodes; matches buildClusterMetrics semantics.
+    // No overloaded nodes in these unit-test snapshots.
+    m.knownNodes       = activeNodes + unavailableNodes;
     m.totalSubmitted   = totalSubmitted;
     // throughputPerSecond, meanP50LatencyUs, maxP99LatencyUs, totalRejected
     // are intentionally left zero (DEBT-002).

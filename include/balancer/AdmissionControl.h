@@ -276,16 +276,7 @@ public:
         {
             if (priority == Priority::Critical || priority == Priority::High)
             {
-                // High-priority overflow: route to holding queue if space permits.
-                if (mHoldingQueueDepth.load(std::memory_order_relaxed)
-                        >= mHoldingQueueCapacity)
-                {
-                    ++mRejections[static_cast<size_t>(SubmitError::HoldingQueueFull)];
-                    return fat_p::unexpected(SubmitError::HoldingQueueFull);
-                }
-                mHoldingQueueDepth.fetch_add(1, std::memory_order_relaxed);
-                // Caller is responsible for placing the job in the holding queue.
-                return {};
+                return tryReserveHoldingSlot();
             }
             else
             {
@@ -318,6 +309,30 @@ public:
     }
 
 private:
+    [[nodiscard]] fat_p::Expected<void, SubmitError>
+    tryReserveHoldingSlot() noexcept
+    {
+        uint32_t current = mHoldingQueueDepth.load(std::memory_order_relaxed);
+
+        while (true)
+        {
+            if (current >= mHoldingQueueCapacity)
+            {
+                ++mRejections[static_cast<size_t>(SubmitError::HoldingQueueFull)];
+                return fat_p::unexpected(SubmitError::HoldingQueueFull);
+            }
+
+            if (mHoldingQueueDepth.compare_exchange_weak(
+                    current,
+                    current + 1,
+                    std::memory_order_acq_rel,
+                    std::memory_order_relaxed))
+            {
+                return {};
+            }
+        }
+    }
+
     detail::TokenBucket mGlobalBucket;
     detail::TokenBucket mNormalBucket;
     detail::TokenBucket mLowBucket;

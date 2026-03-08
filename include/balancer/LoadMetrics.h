@@ -184,11 +184,17 @@ struct LoadMetrics
  */
 struct ClusterMetrics
 {
+    /// Total nodes represented by this snapshot, regardless of state.
+    uint32_t knownNodes = 0;
+
     /// Number of nodes currently in Idle or Busy state.
     uint32_t activeNodes     = 0;
 
     /// Number of nodes in Failed or Offline state.
     uint32_t unavailableNodes = 0;
+
+    /// Number of nodes currently in Overloaded state.
+    uint32_t overloadedNodes = 0;
 
     /// Total jobs submitted across all nodes since balancer start.
     uint64_t totalSubmitted   = 0;

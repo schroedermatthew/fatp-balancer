@@ -227,21 +227,82 @@ public:
     }
 
     /**
+     * @brief Remove a held job by its holding handle and return it.
+     *
+     * Returns the entry if found and removes it, adjusting size accounting.
+     * Returns `std::nullopt` if not found.
+     *
+     * Used by `Balancer::cancel()` to retrieve the entry so its callback
+     * can be invoked with a failure result.
+     *
+     * Thread-safe.
+     *
+     * @param rawHandle  Raw value of the JobHandle (bit 63 must be set).
+     */
+    [[nodiscard]] std::optional<Entry> remove(uint64_t rawHandle)
+    {
+        std::lock_guard lock(mMutex);
+
+        if (auto removed = extractFrom(mCritical, rawHandle))
+        {
+            --mSize;
+            return removed;
+        }
+        if (auto removed = extractFrom(mHigh, rawHandle))
+        {
+            --mSize;
+            return removed;
+        }
+        return std::nullopt;
+    }
+
+    /**
      * @brief Cancel a held job by its holding handle.
      *
-     * Removes the entry whose `holdHandle` matches `rawHandle`.
-     * Returns `true` if the job was found and removed, `false` if not found
-     * (it may have been dispatched already).
-     *
+     * Returns `true` if found and removed, `false` if not found.
      * Thread-safe.
      *
      * @param rawHandle  Raw value of the JobHandle (bit 63 must be set).
      */
     bool cancel(uint64_t rawHandle)
     {
+        return remove(rawHandle).has_value();
+    }
+
+    /**
+     * @brief Requeue an existing entry without changing its holding handle.
+     *
+     * Used by `Balancer` retry paths after `tryDequeue()`. Capacity enforcement
+     * is applied, but under normal operation this should succeed because the
+     * entry came from this queue and freed its slot when dequeued.
+     *
+     * Thread-safe.
+     *
+     * @param entry  Entry previously obtained from `tryDequeue()`.
+     * @return       The original `JobHandle` on success, `HoldingQueueFull` if full.
+     */
+    [[nodiscard]] fat_p::Expected<JobHandle, SubmitError>
+    requeue(Entry entry)
+    {
         std::lock_guard lock(mMutex);
-        return cancelFrom(mCritical, rawHandle) ||
-               cancelFrom(mHigh,     rawHandle);
+
+        if (mSize >= mCapacity)
+        {
+            return fat_p::unexpected(SubmitError::HoldingQueueFull);
+        }
+
+        const uint64_t rawHandle = entry.holdHandle;
+        if (entry.job.priority == Priority::Critical)
+        {
+            mCritical.push_back(std::move(entry));
+        }
+        else
+        {
+            mHigh.push_back(std::move(entry));
+        }
+
+        ++mSize;
+        return JobHandle{rawHandle};
     }
 
     // ---- Observability -----------------------------------------------------
@@ -264,18 +325,19 @@ public:
     [[nodiscard]] uint32_t capacity() const noexcept { return mCapacity; }
 
 private:
-    bool cancelFrom(std::deque<Entry>& q, uint64_t rawHandle)
+    static std::optional<Entry> extractFrom(std::deque<Entry>& q,
+                                             uint64_t          rawHandle)
     {
         for (auto it = q.begin(); it != q.end(); ++it)
         {
             if (it->holdHandle == rawHandle)
             {
+                Entry removed = std::move(*it);
                 q.erase(it);
-                --mSize;
-                return true;
+                return removed;
             }
         }
-        return false;
+        return std::nullopt;
     }
 
     const uint32_t               mCapacity;

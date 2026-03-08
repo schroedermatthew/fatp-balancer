@@ -241,13 +241,9 @@ public:
     /**
      * @brief Sample cluster metrics and drive a TelemetryAdvisor in one call.
      *
-     * Captures a TelemetrySnapshot via captureSnapshot(), converts the
-     * DEBT-002-reliable fields to ClusterMetrics, and calls
-     * TelemetryAdvisor::evaluate(). This is the primary integration entry
-     * point for the Phase 7 telemetry loop.
-     *
-     * DEBT-002: only `activeNodes`, `unavailableNodes`, and `totalSubmitted`
-     * are forwarded to the advisor. Latency-based alerting requires Phase 8.
+     * Calls `balancer.clusterMetrics()` for the authoritative, richer snapshot
+     * (includes `knownNodes`, `overloadedNodes`, latency, and throughput) and
+     * passes it directly to `TelemetryAdvisor::evaluate()`.
      *
      * @param advisor   The TelemetryAdvisor to drive.
      * @param balancer  The Balancer whose aggregate counts are sampled.
@@ -258,9 +254,7 @@ public:
     [[nodiscard]] fat_p::Expected<void, std::string>
     tick(TelemetryAdvisor& advisor, const Balancer& balancer) const
     {
-        TelemetrySnapshot snap    = captureSnapshot(balancer);
-        ClusterMetrics    metrics = detail::toClusterMetrics(snap);
-        return advisor.evaluate(metrics);
+        return advisor.evaluate(balancer.clusterMetrics());
     }
 
     /**

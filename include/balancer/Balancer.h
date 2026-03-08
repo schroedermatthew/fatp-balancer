@@ -242,7 +242,7 @@ public:
             job.id        = nextJobId();
 
             auto heldJob  = job;
-            auto holdCb   = makeCompletionCallback(heldJob);
+            auto holdCb   = makeHoldingTerminalCallback(heldJob);
 
             auto hResult = mHoldingQueue.enqueue(std::move(heldJob), std::move(holdCb));
             if (!hResult.has_value())
@@ -285,10 +285,10 @@ public:
         job.submitted = Clock::now();
         job.id        = nextJobId();
 
-        // Snapshot id and a copy for map registration and aging before move.
-        const JobId  dispatchedId  = job.id;
+        // Snapshot a copy for map registration and aging before move.
         const Job    jobSnapshot   = job;
-        auto completionCb = makeCompletionCallback(jobSnapshot);
+        auto regState     = std::make_shared<DispatchRegistrationState>();
+        auto completionCb = makeDispatchCompletionCallback(jobSnapshot, regState);
         auto nodeResult   = targetNode->submit(std::move(job), std::move(completionCb));
         if (!nodeResult.has_value())
         {
@@ -297,22 +297,8 @@ public:
         }
 
         const JobHandle handle = nodeResult.value();
-
-        // Register in both maps.
-        {
-            std::lock_guard mapLock(mJobMapMutex);
-            mJobNodeMap.insert(handle.value(), targetNode->id());
-            mJobIdToHandleMap.insert(dispatchedId.value(), handle.value());
-        }
-
-        // Begin aging tracking after the job is safely in the node's queue.
-        if (mAgingEnabled.load(std::memory_order_acquire))
-        {
-            std::lock_guard agingLock(mAgingMutex);
-            mAgingEngine.track(jobSnapshot, Clock::now());
-        }
-
         mTotalSubmitted.fetch_add(1, std::memory_order_relaxed);
+        registerDispatchedJob(jobSnapshot, targetNode->id(), handle, regState);
         return handle;
     }
 
@@ -330,33 +316,38 @@ public:
         // DEBT-005: holding handles (bit 63 set) route to the HoldingQueue.
         if (isHoldingHandle(handle.value()))
         {
-            const bool removed = mHoldingQueue.cancel(handle.value());
-            if (!removed)
+            auto removed = mHoldingQueue.remove(handle.value());
+            if (!removed.has_value())
             {
                 return fat_p::unexpected(CancelError::NotFound);
             }
             mAdmission.releaseFromHoldingQueue();
-            mSubmittedCount.fetch_sub(1, std::memory_order_release);
+            removed->onDone(removed->job, /*succeeded=*/false);
             return {};
         }
 
-        NodeId targetId{0};
+        auto routing = lookupRouting(handle);
+        if (!routing.has_value())
         {
-            std::lock_guard mapLock(mJobMapMutex);
-            const NodeId* found = mJobNodeMap.find(handle.value());
-            if (!found)
-            {
-                return fat_p::unexpected(CancelError::NotFound);
-            }
-            targetId = *found;
+            return fat_p::unexpected(CancelError::NotFound);
         }
 
-        INode* node = findNode(targetId);
+        INode* node = findNode(routing->nodeId);
         if (!node)
         {
             return fat_p::unexpected(CancelError::NotFound);
         }
-        return node->cancel(handle);
+
+        auto cancelResult = node->cancel(handle);
+        if (!cancelResult.has_value())
+        {
+            return cancelResult;
+        }
+
+        Job cancelledJob{};
+        cancelledJob.id = routing->jobId;
+        finalizeJobLifecycle(cancelledJob, handle, /*succeeded=*/false);
+        return {};
     }
 
     // ---- Policy switching --------------------------------------------------
@@ -531,6 +522,148 @@ public:
 private:
     // ---- Aging thread management -------------------------------------------
 
+    // ---- Routing and lifecycle helpers -------------------------------------
+
+    struct JobRoutingInfo
+    {
+        JobId  jobId;
+        NodeId nodeId;
+    };
+
+    struct DispatchRegistrationState
+    {
+        std::mutex               mutex;
+        bool                     published = false;
+        std::optional<JobHandle> handle;
+        std::optional<Job>       earlyCompletedJob;
+        bool                     earlySucceeded = false;
+    };
+
+    [[nodiscard]] std::optional<JobRoutingInfo>
+    lookupRouting(JobHandle handle) const
+    {
+        std::lock_guard mapLock(mJobMapMutex);
+        const JobRoutingInfo* info = mHandleToJobInfo.find(handle.value());
+        if (!info)
+        {
+            return std::nullopt;
+        }
+        return *info;
+    }
+
+    void eraseRoutingState(JobHandle handle)
+    {
+        std::lock_guard mapLock(mJobMapMutex);
+        const JobRoutingInfo* info = mHandleToJobInfo.find(handle.value());
+        if (!info)
+        {
+            return;
+        }
+        mJobIdToHandleMap.erase(info->jobId.value());
+        mHandleToJobInfo.erase(handle.value());
+    }
+
+    void finalizeJobLifecycle(const Job&               finishedJob,
+                              std::optional<JobHandle> routedHandle,
+                              bool                     succeeded)
+    {
+        if (succeeded)
+        {
+            mCostModel.update(finishedJob);
+            mTotalCompleted.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        {
+            std::lock_guard agingLock(mAgingMutex);
+            mAgingEngine.untrack(finishedJob.id);
+        }
+
+        if (routedHandle.has_value())
+        {
+            eraseRoutingState(*routedHandle);
+        }
+
+        mSubmittedCount.fetch_sub(1, std::memory_order_release);
+        notifyHoldingDrainer();
+    }
+
+    [[nodiscard]] JobCompletionCallback
+    makeHoldingTerminalCallback(const Job& capturedJobRef)
+    {
+        Job capturedJob = capturedJobRef;
+        return [this, capturedJob](Job completed, bool succeeded) mutable
+        {
+            capturedJob.observedCost = completed.observedCost;
+            capturedJob.executedBy   = completed.executedBy;
+            finalizeJobLifecycle(capturedJob, std::nullopt, succeeded);
+        };
+    }
+
+    [[nodiscard]] JobCompletionCallback
+    makeDispatchCompletionCallback(
+        const Job& capturedJobRef,
+        const std::shared_ptr<DispatchRegistrationState>& regState)
+    {
+        Job capturedJob = capturedJobRef;
+        return [this, capturedJob, regState](Job completed, bool succeeded) mutable
+        {
+            capturedJob.observedCost = completed.observedCost;
+            capturedJob.executedBy   = completed.executedBy;
+
+            std::optional<JobHandle> routedHandle;
+            {
+                std::lock_guard stateLock(regState->mutex);
+                if (!regState->published)
+                {
+                    regState->earlyCompletedJob = capturedJob;
+                    regState->earlySucceeded    = succeeded;
+                    return;
+                }
+                routedHandle = regState->handle;
+            }
+
+            finalizeJobLifecycle(capturedJob, routedHandle, succeeded);
+        };
+    }
+
+    void registerDispatchedJob(
+        const Job&                                         jobSnapshot,
+        NodeId                                             nodeId,
+        JobHandle                                          handle,
+        const std::shared_ptr<DispatchRegistrationState>& regState)
+    {
+        {
+            std::lock_guard mapLock(mJobMapMutex);
+            mHandleToJobInfo.insert(handle.value(),
+                                    JobRoutingInfo{jobSnapshot.id, nodeId});
+            mJobIdToHandleMap.insert(jobSnapshot.id.value(), handle.value());
+        }
+
+        if (mAgingEnabled.load(std::memory_order_acquire))
+        {
+            std::lock_guard agingLock(mAgingMutex);
+            mAgingEngine.track(jobSnapshot, Clock::now());
+        }
+
+        std::optional<Job> earlyJob;
+        bool               earlySucceeded = false;
+        {
+            std::lock_guard stateLock(regState->mutex);
+            regState->handle    = handle;
+            regState->published = true;
+            if (regState->earlyCompletedJob.has_value())
+            {
+                earlyJob       = std::move(regState->earlyCompletedJob);
+                earlySucceeded = regState->earlySucceeded;
+            }
+        }
+
+        if (earlyJob.has_value())
+        {
+            finalizeJobLifecycle(*earlyJob, handle, earlySucceeded);
+        }
+    }
+
     // ---- Holding queue drain management ------------------------------------
 
     void startHoldingDrainThread()
@@ -601,32 +734,28 @@ private:
                 if (entry.job.deadline.has_value() &&
                     Clock::now() >= *entry.job.deadline)
                 {
-                    entry.onDone(entry.job, /*succeeded=*/false);
                     mAdmission.releaseFromHoldingQueue();
-                    mSubmittedCount.fetch_sub(1, std::memory_order_release);
+                    entry.onDone(entry.job, /*succeeded=*/false);
                     continue;
                 }
 
                 // Drop if maxRetries exceeded — unconditional.
                 if (maxR > 0 && entry.job.holdRetries >= maxR)
                 {
-                    entry.onDone(entry.job, /*succeeded=*/false);
                     mAdmission.releaseFromHoldingQueue();
-                    mSubmittedCount.fetch_sub(1, std::memory_order_release);
+                    entry.onDone(entry.job, /*succeeded=*/false);
                     continue;
                 }
 
                 // Check cluster capacity for dispatch.
                 auto metricsNow = snapshotMetrics();
                 const bool stillSaturated =
-                    areAllEligibleOverloaded(metricsNow, Priority::High);
+                    areAllEligibleOverloaded(metricsNow, entry.job.priority);
 
                 if (stillSaturated)
                 {
-                    // Re-queue and wait for next drain cycle.
-                    auto recbSat = makeCompletionCallback(entry.job);
-                    (void)mHoldingQueue.enqueue(
-                        std::move(entry.job), std::move(recbSat));
+                    // Re-queue in-place. The admission reservation is still held.
+                    (void)mHoldingQueue.requeue(std::move(entry));
                     break;
                 }
 
@@ -642,9 +771,7 @@ private:
                     {
                         // No eligible node — re-queue and stop this cycle.
                         entry.job.holdRetries++;
-                        auto recb3 = makeCompletionCallback(entry.job);
-                        (void)mHoldingQueue.enqueue(
-                            std::move(entry.job), std::move(recb3));
+                        (void)mHoldingQueue.requeue(std::move(entry));
                         break;
                     }
                     targetNode = findNode(sel.value());
@@ -653,79 +780,34 @@ private:
                 if (!targetNode)
                 {
                     entry.job.holdRetries++;
-                    auto recbNF = makeCompletionCallback(entry.job);
-                    (void)mHoldingQueue.enqueue(
-                        std::move(entry.job), std::move(recbNF));
+                    (void)mHoldingQueue.requeue(std::move(entry));
                     break;
                 }
 
-                // Release holding slot and dispatch.
-                mAdmission.releaseFromHoldingQueue();
                 entry.job.submitted = Clock::now();
 
-                const JobId drainedId = entry.job.id;
                 const Job   drainSnap = entry.job;
+                auto regState         = std::make_shared<DispatchRegistrationState>();
+                auto dispatchCb       = makeDispatchCompletionCallback(drainSnap, regState);
 
                 auto nodeResult = targetNode->submit(
-                    std::move(entry.job), std::move(entry.onDone));
+                    std::move(entry.job), std::move(dispatchCb));
 
                 if (!nodeResult.has_value())
                 {
-                    // Node refused — re-queue and re-acquire AC slot.
-                    (void)mAdmission.evaluate(Priority::High, /*sat=*/true);
-                    Job requeue       = drainSnap;
-                    requeue.holdRetries++;
-                    auto recb         = makeCompletionCallback(requeue);
-                    (void)mHoldingQueue.enqueue(std::move(requeue), std::move(recb));
+                    // Node refused — keep the reservation and requeue the same entry.
+                    entry.job = drainSnap;
+                    entry.job.holdRetries++;
+                    (void)mHoldingQueue.requeue(std::move(entry));
                     break;
                 }
 
-                // Successfully dispatched.
+                // Successfully dispatched — release holding slot and register.
                 const JobHandle nodeHandle = nodeResult.value();
-                {
-                    std::lock_guard mapLock(mJobMapMutex);
-                    mJobNodeMap.insert(nodeHandle.value(), targetNode->id());
-                    mJobIdToHandleMap.insert(drainedId.value(), nodeHandle.value());
-                }
-
-                if (mAgingEnabled.load(std::memory_order_acquire))
-                {
-                    std::lock_guard agingLock(mAgingMutex);
-                    mAgingEngine.track(drainSnap, Clock::now());
-                }
+                mAdmission.releaseFromHoldingQueue();
+                registerDispatchedJob(drainSnap, targetNode->id(), nodeHandle, regState);
             }
         }
-    }
-
-    // ---- Completion callback factory ----------------------------------------
-
-    /**
-     * @brief Build the standard job-completion callback for a given job.
-     *
-     * Extracted so both the normal submit path and the holding-queue drain
-     * loop can build identical callbacks without duplicating logic.
-     */
-    [[nodiscard]] JobCompletionCallback makeCompletionCallback(const Job& capturedJobRef)
-    {
-        Job capturedJob = capturedJobRef;
-        return [this, capturedJob](Job completed, bool succeeded) mutable
-        {
-            capturedJob.observedCost = completed.observedCost;
-            capturedJob.executedBy   = completed.executedBy;
-            if (succeeded)
-            {
-                mCostModel.update(capturedJob);
-                mTotalCompleted.fetch_add(1, std::memory_order_relaxed);
-            }
-            if (mAgingEnabled.load(std::memory_order_acquire))
-            {
-                std::lock_guard agingLock(mAgingMutex);
-                mAgingEngine.untrack(capturedJob.id);
-            }
-            mSubmittedCount.fetch_sub(1, std::memory_order_release);
-            // Wake drainer: a completion may have freed capacity for held jobs.
-            notifyHoldingDrainer();
-        };
     }
 
     // ---- Aging thread management -------------------------------------------
@@ -802,9 +884,9 @@ private:
                         mJobIdToHandleMap.find(ev.id.value());
                     if (!hFound) { continue; }
                     rawHandle = *hFound;
-                    const NodeId* nFound = mJobNodeMap.find(rawHandle);
-                    if (!nFound) { continue; }
-                    nodeId = *nFound;
+                    const JobRoutingInfo* info = mHandleToJobInfo.find(rawHandle);
+                    if (!info) { continue; }
+                    nodeId = info->nodeId;
                 }
                 INode* node = findNode(nodeId);
                 if (node)
@@ -872,11 +954,24 @@ private:
                 ++cm.unavailableNodes;
             }
 
+            if (m.state == NodeState::Overloaded)
+            {
+                ++cm.overloadedNodes;
+            }
+
             if (m.p99LatencyUs > p99Max)
             {
                 p99Max = m.p99LatencyUs;
             }
         }
+
+        // knownNodes counts only nodes in stable health states: active, unavailable,
+        // or overloaded. Transitional states (Recovering, Initializing, Draining) are
+        // excluded so that a recovering node does not inflate the denominator and
+        // cause false overload alerts. This matches the old activeNodes+unavailableNodes
+        // denominator semantics while adding overloaded to prevent a zero denominator
+        // when all nodes are overloaded.
+        cm.knownNodes = cm.activeNodes + cm.unavailableNodes + cm.overloadedNodes;
 
         cm.meanP50LatencyUs = (p50Count > 0) ? (p50Sum / p50Count) : 0;
         cm.maxP99LatencyUs  = p99Max;
@@ -963,8 +1058,8 @@ private:
     AdmissionControl                   mAdmission;
     CostModel                          mCostModel;
 
-    // Primary job-to-node map for O(1) cancel lookup.
-    fat_p::FastHashMap<uint64_t, NodeId>   mJobNodeMap;
+    // Primary job routing map: JobHandle (uint64_t) → JobRoutingInfo.
+    fat_p::FastHashMap<uint64_t, JobRoutingInfo>   mHandleToJobInfo;
     // Secondary map: JobId (uint32_t) → JobHandle (uint64_t) for AgingEngine
     // expired-job cancellation, where only JobId is available.
     fat_p::FastHashMap<uint32_t, uint64_t> mJobIdToHandleMap;

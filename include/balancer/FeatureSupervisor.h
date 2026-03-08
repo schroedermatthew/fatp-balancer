@@ -222,6 +222,14 @@ public:
     setFeatureEnabled(std::string_view feature, bool enabled)
     {
         const std::string name(feature);
+
+        if (isPolicyFeature(name) || isAlertFeature(name))
+        {
+            return fat_p::unexpected(std::string{
+                "setFeatureEnabled() is only for behavioral features; "
+                "use applyChanges() for alerts and switchPolicy() for manual policy selection"});
+        }
+
         if (enabled) { return mManager.enable(name); }
         return mManager.disable(name);
     }
@@ -426,6 +434,16 @@ private:
                name == kPolicyWorkStealing ||
                name == kPolicyAffinity     ||
                name == kPolicyComposite;
+    }
+
+    /// Returns true if @p name belongs to the alert MutuallyExclusive group.
+    [[nodiscard]] static bool isAlertFeature(const std::string& name) noexcept
+    {
+        using namespace features;
+        return name == kAlertNone      ||
+               name == kAlertOverload  ||
+               name == kAlertLatency   ||
+               name == kAlertNodeFault;
     }
 
     /**

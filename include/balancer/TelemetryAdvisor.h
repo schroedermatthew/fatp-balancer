@@ -260,14 +260,13 @@ private:
      *
      * Priority order: `kAlertNodeFault` > `kAlertOverload` > `kAlertLatency` > `""`.
      *
-     * totalNodes is computed as `activeNodes + unavailableNodes`. Nodes in
-     * Draining, Recovering, Overloaded, or Initializing states are not counted
-     * by either ClusterMetrics counter. Returns `""` when totalNodes is zero
-     * (empty cluster — no meaningful alert can be derived).
+     * `total` is `knownNodes` — all nodes represented by the snapshot regardless
+     * of state. This prevents a zero denominator when all nodes are overloaded.
+     * Returns `""` when `knownNodes` is zero (empty cluster).
      */
     [[nodiscard]] std::string_view determineAlert(const ClusterMetrics& m) const noexcept
     {
-        const uint32_t total = m.activeNodes + m.unavailableNodes;
+        const uint32_t total = m.knownNodes;
 
         // Empty cluster — no meaningful alert can be derived.
         if (total == 0)

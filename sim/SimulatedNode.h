@@ -55,6 +55,7 @@ BALANCER_META:
 #include <chrono>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <vector>
 
@@ -197,19 +198,28 @@ public:
      */
     void injectFault(FaultType fault, FaultConfig config = {})
     {
-        std::lock_guard lock(mMutex);
-        mFault       = fault;
-        mFaultConfig = config;
+        std::optional<balancer::NodeState> stateChange;
+        {
+            std::lock_guard lock(mMutex);
+            mFault       = fault;
+            mFaultConfig = config;
 
-        if (fault == FaultType::Crash)
-        {
-            mState = balancer::NodeState::Failed;
-            notifyStateChangeUnlocked(balancer::NodeState::Failed);
+            if (fault == FaultType::Crash)
+            {
+                mState      = balancer::NodeState::Failed;
+                stateChange = balancer::NodeState::Failed;
+            }
+            else if (fault == FaultType::None &&
+                     mState == balancer::NodeState::Failed)
+            {
+                mState      = balancer::NodeState::Recovering;
+                stateChange = balancer::NodeState::Recovering;
+            }
         }
-        else if (fault == FaultType::None && mState == balancer::NodeState::Failed)
+
+        if (stateChange.has_value())
         {
-            mState = balancer::NodeState::Recovering;
-            notifyStateChangeUnlocked(balancer::NodeState::Recovering);
+            notifyStateChange(*stateChange);
         }
     }
 
@@ -224,6 +234,7 @@ public:
     submit(balancer::Job job, balancer::JobCompletionCallback onDone) override
     {
         fat_p::SlotMapHandle smHandle;
+        std::optional<balancer::NodeState> stateChange;
 
         {
             std::lock_guard lock(mMutex);
@@ -253,15 +264,20 @@ public:
             job.executedBy           = mId;
             job.queueDepthAtDispatch = mQueueDepth.load(std::memory_order_relaxed);
 
-            // Register in SlotMap for cancel support.
-            smHandle = mPendingSlots.insert(true);
+            // Register as queued. executeJob() flips to Running when execution starts.
+            smHandle = mPendingSlots.insert(PendingJobState::Queued);
 
             // Track per-priority depth.
             auto bandIdx = static_cast<size_t>(job.priority);
             mQueueDepthByPriority[bandIdx].fetch_add(1, std::memory_order_relaxed);
             mQueueDepth.fetch_add(1, std::memory_order_relaxed);
 
-            updateStateUnlocked();
+            stateChange = updateStateUnlocked();
+        }
+
+        if (stateChange.has_value())
+        {
+            notifyStateChange(*stateChange);
         }
 
         // Encode SlotMap handle into JobHandle:
@@ -296,13 +312,20 @@ public:
 
         std::lock_guard lock(mMutex);
 
-        if (!mPendingSlots.is_valid(smHandle))
+        PendingJobState* state = mPendingSlots.get(smHandle);
+        if (!state)
         {
             return fat_p::unexpected(
                 balancer::CancelError::NotFound);
         }
 
-        // Erase: the task lambda will see is_valid() == false and skip execution.
+        if (*state == PendingJobState::Running)
+        {
+            return fat_p::unexpected(
+                balancer::CancelError::AlreadyRunning);
+        }
+
+        // Erase: executeJob() will see the slot missing and treat the job as cancelled.
         mPendingSlots.erase(smHandle);
         mPriorityOverrides.erase(handle.value());
         return {};
@@ -330,7 +353,8 @@ public:
 
         std::lock_guard lock(mMutex);
 
-        if (!mPendingSlots.is_valid(smHandle))
+        PendingJobState* state = mPendingSlots.get(smHandle);
+        if (!state || *state != PendingJobState::Queued)
         {
             return fat_p::unexpected(balancer::CancelError::NotFound);
         }
@@ -388,10 +412,19 @@ public:
 private:
     // ---- Task execution ----------------------------------------------------
 
+    enum class PendingJobState : uint8_t
+    {
+        Queued,
+        Running,
+    };
+
     void executeJob(balancer::Job         job,
                     balancer::JobCompletionCallback onDone,
                     fat_p::SlotMapHandle  smHandle)
     {
+        bool cancelled = false;
+        std::optional<balancer::NodeState> stateChange;
+
         // Check cancellation under lock; also consume any priority override.
         {
             std::lock_guard lock(mMutex);
@@ -401,22 +434,36 @@ private:
                 (static_cast<uint64_t>(smHandle.index) << 32) |
                  static_cast<uint64_t>(smHandle.generation);
 
-            if (!mPendingSlots.is_valid(smHandle))
+            PendingJobState* pendingState = mPendingSlots.get(smHandle);
+            if (!pendingState)
             {
                 // Cancelled — decrement counters without firing callback.
                 mPriorityOverrides.erase(rawKey);
                 decrementQueueCounters(job.priority);
-                updateStateUnlocked();
-                return;
+                stateChange = updateStateUnlocked();
+                cancelled   = true;
             }
-
-            // Consume any priority override stored by reprioritise().
-            const Priority* ov = mPriorityOverrides.find(rawKey);
-            if (ov)
+            else
             {
-                job.priority = *ov;
-                mPriorityOverrides.erase(rawKey);
+                *pendingState = PendingJobState::Running;
+
+                // Consume any priority override stored by reprioritise().
+                const Priority* ov = mPriorityOverrides.find(rawKey);
+                if (ov)
+                {
+                    job.priority = *ov;
+                    mPriorityOverrides.erase(rawKey);
+                }
             }
+        }
+
+        if (cancelled)
+        {
+            if (stateChange.has_value())
+            {
+                notifyStateChange(*stateChange);
+            }
+            return;
         }
 
         auto t0 = balancer::Clock::now();
@@ -447,6 +494,7 @@ private:
         const uint32_t upc = mConfig.usPerCostUnit > 0 ? mConfig.usPerCostUnit : 1;
         job.observedCost = balancer::Cost{elapsedUs / upc};
 
+        stateChange.reset();
         {
             std::lock_guard lock(mMutex);
             decrementQueueCounters(job.priority);
@@ -460,7 +508,12 @@ private:
             }
             recordLatency(elapsedUs);
             mPendingSlots.erase(smHandle);
-            updateStateUnlocked();
+            stateChange = updateStateUnlocked();
+        }
+
+        if (stateChange.has_value())
+        {
+            notifyStateChange(*stateChange);
         }
 
         onDone(std::move(job), succeeded);
@@ -517,11 +570,11 @@ private:
         }
     }
 
-    void updateStateUnlocked()
+    [[nodiscard]] std::optional<balancer::NodeState> updateStateUnlocked()
     {
         if (mFault == FaultType::Crash || mState == balancer::NodeState::Failed)
         {
-            return;
+            return std::nullopt;
         }
 
         const uint32_t depth = mQueueDepth.load(std::memory_order_relaxed);
@@ -552,8 +605,10 @@ private:
         if (newState != mState)
         {
             mState = newState;
-            notifyStateChangeUnlocked(newState);
+            return newState;
         }
+
+        return std::nullopt;
     }
 
     void notifyStateChange(balancer::NodeState s)
@@ -566,14 +621,6 @@ private:
         if (cb)
         {
             cb(s);
-        }
-    }
-
-    void notifyStateChangeUnlocked(balancer::NodeState s)
-    {
-        if (mStateCallback)
-        {
-            mStateCallback(s);
         }
     }
 
@@ -636,7 +683,7 @@ private:
     std::atomic<uint32_t>           mQueueDepth{0};
 
     // SlotMap for cancel support. Not thread-safe; access under mMutex.
-    fat_p::SlotMap<bool>            mPendingSlots;
+    fat_p::SlotMap<PendingJobState> mPendingSlots;
 
     // Priority overrides applied by reprioritise(). Keyed by raw JobHandle
     // value. Entries are removed when executeJob() reads them or when the

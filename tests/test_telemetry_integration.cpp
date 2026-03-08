@@ -492,6 +492,7 @@ FATP_TEST_CASE(latency_alert_via_direct_evaluate_drives_supervisor)
     ClusterMetrics healthy;
     healthy.activeNodes      = 4;
     healthy.unavailableNodes = 0;
+    healthy.knownNodes       = 4;
     healthy.meanP50LatencyUs = 0;
 
     auto r0 = advisor.evaluate(healthy);
@@ -502,6 +503,7 @@ FATP_TEST_CASE(latency_alert_via_direct_evaluate_drives_supervisor)
     ClusterMetrics latent;
     latent.activeNodes      = 4;
     latent.unavailableNodes = 0;
+    latent.knownNodes       = 4;
     latent.meanP50LatencyUs = 15'000; // 15 ms > 10 ms threshold
 
     auto r1 = advisor.evaluate(latent);
