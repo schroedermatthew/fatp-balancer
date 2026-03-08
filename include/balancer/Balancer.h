@@ -598,8 +598,13 @@ private:
             eraseRoutingState(*routedHandle);
         }
 
-        mSubmittedCount.fetch_sub(1, std::memory_order_release);
+        // Notify the holding drain thread BEFORE decrementing mSubmittedCount.
+        // The destructor spins until mSubmittedCount reaches zero; if we
+        // decremented first, the destructor could destroy mHoldingDrainCv
+        // (via stopHoldingDrainThread) while we are still inside
+        // pthread_cond_signal — a TSan data race on the condvar itself.
         notifyHoldingDrainer();
+        mSubmittedCount.fetch_sub(1, std::memory_order_release);
     }
 
     [[nodiscard]] JobCompletionCallback

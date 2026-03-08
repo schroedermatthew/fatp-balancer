@@ -308,7 +308,7 @@ FATP_TEST_CASE(metrics_completed_count_increments)
     node.start();
     std::this_thread::sleep_for(5ms);
 
-    int done = 0;
+    std::atomic<int> done{0};
     for (int i = 0; i < 3; ++i)
     {
         Job j = makeJob();
