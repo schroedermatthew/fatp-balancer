@@ -1,0 +1,63 @@
+name: fatp-balancer Benchmarks
+
+# Manual dispatch only — benchmarks are never run as part of the main CI gate.
+# See fatp-balancer CI Workflow Style Guide §3.2 and §5.
+on:
+  workflow_dispatch:
+    inputs:
+      batches:
+        description: 'Measured batches per benchmark'
+        required: false
+        default: '20'
+        type: string
+      target_work:
+        description: 'Target ops per batch'
+        required: false
+        default: '100000'
+        type: string
+
+jobs:
+  benchmarks:
+    name: Benchmarks (GCC-13, C++20, -O3)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout FAT-P
+        uses: actions/checkout@v4
+        with:
+          repository: schroedermatthew/FatP
+          path: FatP
+
+      - name: Install GCC
+        run: sudo apt-get install -y g++-13
+
+      - name: Check for benchmark sources
+        id: bench_check
+        run: |
+          if compgen -G "bench/benchmark_*.cpp" > /dev/null 2>&1; then
+            echo "found=true" >> $GITHUB_OUTPUT
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "No benchmark sources found in bench/ — nothing to build."
+          fi
+
+      - name: Build benchmarks
+        if: steps.bench_check.outputs.found == 'true'
+        run: |
+          g++-13 -std=c++20 \
+            -Wall -Wextra -O3 -DNDEBUG \
+            -DBENCHMARK_BATCHES=${{ inputs.batches }} \
+            -DBENCHMARK_TARGET_WORK=${{ inputs.target_work }} \
+            -I./include \
+            -I./policies \
+            -I./FatP/include/fat_p \
+            bench/benchmark_*.cpp -o bench_bin \
+            -lpthread
+
+      - name: Run benchmarks
+        if: steps.bench_check.outputs.found == 'true'
+        env:
+          BENCHMARK_BATCHES: ${{ inputs.batches }}
+          BENCHMARK_TARGET_WORK: ${{ inputs.target_work }}
+        run: ./bench_bin

@@ -1,0 +1,352 @@
+name: fatp-balancer CI
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'include/balancer/**'
+      - 'policies/**'
+      - 'sim/**'
+      - 'tests/**'
+      - 'bench/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    paths:
+      - 'include/balancer/**'
+      - 'policies/**'
+      - 'sim/**'
+      - 'tests/**'
+      - 'bench/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/ci.yml'
+
+jobs:
+
+  # ---------------------------------------------------------------------------
+  # Linux GCC: C++20 (GCC 12, 13) + C++23 forward-compat (GCC 14)
+  # ---------------------------------------------------------------------------
+  linux-gcc:
+    name: Linux GCC ${{ matrix.version }} C++${{ matrix.std }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { version: 12, std: 20 }
+          - { version: 13, std: 20 }
+          - { version: 14, std: 23 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout FAT-P
+        uses: actions/checkout@v4
+        with:
+          repository: schroedermatthew/FatP
+          path: FatP
+
+      - name: Install GCC
+        run: sudo apt-get install -y g++-${{ matrix.version }}
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DFATP_INCLUDE_DIR=${{ github.workspace }}/FatP/include/fat_p \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-${{ matrix.version }} \
+            -DCMAKE_CXX_STANDARD=${{ matrix.std }}
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  # ---------------------------------------------------------------------------
+  # Linux Clang: C++20 (Clang 16) + C++23 forward-compat (Clang 17)
+  # ubuntu-22.04 used — Clang 16/17 available in default repos
+  # ---------------------------------------------------------------------------
+  linux-clang:
+    name: Linux Clang ${{ matrix.version }} C++${{ matrix.std }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { version: 16, std: 20 }
+          - { version: 17, std: 23 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout FAT-P
+        uses: actions/checkout@v4
+        with:
+          repository: schroedermatthew/FatP
+          path: FatP
+
+      - name: Install Clang
+        run: sudo apt-get install -y clang-${{ matrix.version }}
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DFATP_INCLUDE_DIR=${{ github.workspace }}/FatP/include/fat_p \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=clang++-${{ matrix.version }} \
+            -DCMAKE_CXX_STANDARD=${{ matrix.std }} \
+            -DCMAKE_CXX_FLAGS="-Wno-gnu-zero-variadic-macro-arguments"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  # ---------------------------------------------------------------------------
+  # Windows MSVC: C++20 (primary) + C++23 forward-compat (/std:c++latest)
+  # advapi32.lib linked via CMake's default Windows libs — no manual /link needed
+  # ---------------------------------------------------------------------------
+  windows-msvc:
+    name: Windows MSVC C++${{ matrix.std }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        std: [20, 23]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout FAT-P
+        uses: actions/checkout@v4
+        with:
+          repository: schroedermatthew/FatP
+          path: FatP
+
+      - name: Configure
+        run: |
+          cmake -B build `
+            -DFATP_INCLUDE_DIR="${{ github.workspace }}\FatP\include\fat_p" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_CXX_STANDARD=${{ matrix.std }} `
+            -DCMAKE_CXX_FLAGS="/wd4324"
+        shell: pwsh
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+        shell: pwsh
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+        shell: pwsh
+
+  # ---------------------------------------------------------------------------
+  # Sanitizers — all at C++20, GCC 13, Debug build
+  # ---------------------------------------------------------------------------
+  sanitizer-asan:
+    name: AddressSanitizer
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout FAT-P
+        uses: actions/checkout@v4
+        with:
+          repository: schroedermatthew/FatP
+          path: FatP
+
+      - name: Install GCC
+        run: sudo apt-get install -y g++-13
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DFATP_INCLUDE_DIR=${{ github.workspace }}/FatP/include/fat_p \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=g++-13 \
+            -DBALANCER_ENABLE_ASAN=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+        run: ctest --test-dir build --output-on-failure
+
+  sanitizer-ubsan:
+    name: UndefinedBehaviorSanitizer
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout FAT-P
+        uses: actions/checkout@v4
+        with:
+          repository: schroedermatthew/FatP
+          path: FatP
+
+      - name: Install GCC
+        run: sudo apt-get install -y g++-13
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DFATP_INCLUDE_DIR=${{ github.workspace }}/FatP/include/fat_p \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=g++-13 \
+            -DBALANCER_ENABLE_UBSAN=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        env:
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build --output-on-failure
+
+  sanitizer-tsan:
+    name: ThreadSanitizer
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout FAT-P
+        uses: actions/checkout@v4
+        with:
+          repository: schroedermatthew/FatP
+          path: FatP
+
+      - name: Install GCC
+        run: sudo apt-get install -y g++-13
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DFATP_INCLUDE_DIR=${{ github.workspace }}/FatP/include/fat_p \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=g++-13 \
+            -DBALANCER_ENABLE_TSAN=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        env:
+          TSAN_OPTIONS: halt_on_error=1
+        run: ctest --test-dir build --output-on-failure
+
+  # ---------------------------------------------------------------------------
+  # Header self-contained check — every include/balancer/ and policies/ header
+  # must compile standalone without transitive includes
+  # ---------------------------------------------------------------------------
+  header-check:
+    name: Header Self-Contained Check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout FAT-P
+        uses: actions/checkout@v4
+        with:
+          repository: schroedermatthew/FatP
+          path: FatP
+
+      - name: Install GCC
+        run: sudo apt-get install -y g++-13
+
+      - name: Check headers compile standalone
+        run: |
+          failed=0
+          for header in include/balancer/*.h policies/*.h; do
+            echo "Checking $header..."
+            echo "#include \"$header\"" > /tmp/check.cpp
+            echo "int main() { return 0; }" >> /tmp/check.cpp
+            if ! g++-13 -std=c++20 -I./include -I./policies \
+                -I./FatP/include/fat_p /tmp/check.cpp -o /dev/null 2>&1; then
+              echo "FAILED: $header"
+              failed=1
+            fi
+          done
+          if [ $failed -ne 0 ]; then
+            echo "One or more headers failed standalone compilation."
+            exit 1
+          fi
+          echo "All headers passed standalone compilation."
+
+  # ---------------------------------------------------------------------------
+  # Transferability gate — sim/ must never appear in core or policy headers.
+  # Hard gate: if this fails, the balancer cannot be deployed without the sim
+  # layer, which defeats the architectural premise.
+  # ---------------------------------------------------------------------------
+  transferability-gate:
+    name: Transferability Gate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify no sim/ includes in core or policies
+        run: |
+          violations=$(grep -rn '#include.*sim/' include/balancer/ policies/ 2>/dev/null || true)
+          if [ -n "$violations" ]; then
+            echo "TRANSFERABILITY VIOLATION: sim/ included in core or policies:"
+            echo "$violations"
+            exit 1
+          fi
+          echo "Transferability gate passed."
+
+  # ---------------------------------------------------------------------------
+  # Strict warnings — extended warning set on top of the base CMake flags.
+  # Werror is already enforced by CMakeLists BALANCER_WARN_FLAGS on GCC/Clang.
+  # ---------------------------------------------------------------------------
+  strict-warnings:
+    name: Strict Warnings (GCC-13, C++20)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout FAT-P
+        uses: actions/checkout@v4
+        with:
+          repository: schroedermatthew/FatP
+          path: FatP
+
+      - name: Install GCC
+        run: sudo apt-get install -y g++-13
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DFATP_INCLUDE_DIR=${{ github.workspace }}/FatP/include/fat_p \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-13 \
+            -DCMAKE_CXX_FLAGS="-Wshadow -Werror"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+  # ---------------------------------------------------------------------------
+  # Gate — all required jobs must pass for CI to be considered green.
+  # Branch protection should require this job, not the individual jobs.
+  # ---------------------------------------------------------------------------
+  ci-success:
+    name: CI Success
+    needs:
+      - linux-gcc
+      - linux-clang
+      - windows-msvc
+      - sanitizer-asan
+      - sanitizer-ubsan
+      - sanitizer-tsan
+      - header-check
+      - transferability-gate
+      - strict-warnings
+    runs-on: ubuntu-24.04
+    if: always()
+    steps:
+      - name: Check all jobs passed
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+            echo "One or more required jobs failed."
+            exit 1
+          fi
+          echo "All required jobs passed."
