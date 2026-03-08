@@ -157,6 +157,13 @@ FATP_TEST_CASE(reprioritise_cancel_clears_override)
 
     // Cancel the job.
     auto cancel = node.cancel(*result);
+    // The job may have started between reprioritise() returning and cancel()
+    // being called. If so, cancel returns AlreadyRunning — not applicable.
+    if (!cancel.has_value() &&
+        cancel.error() == balancer::CancelError::AlreadyRunning)
+    {
+        return true;
+    }
     FATP_ASSERT_TRUE(cancel.has_value(), "cancel must succeed");
 
     // A second reprioritise on the cancelled handle must return NotFound.

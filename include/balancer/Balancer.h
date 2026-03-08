@@ -171,10 +171,25 @@ public:
     }
 
     /**
-     * @brief Destructor. Stops the AgingEngine tick thread if running.
+     * @brief Destructor. Drains all in-flight jobs before stopping background
+     *        threads and destroying members.
+     *
+     * Completion callbacks (`finalizeJobLifecycle`) access `mCostModel` and
+     * `mAgingEngine` from worker threads. Those members are destroyed when
+     * Balancer goes out of scope, so we must wait for all callbacks to return
+     * before the destructor proceeds. Setting `mDraining` blocks new `submit()`
+     * calls; spinning on `mSubmittedCount` waits for all in-progress callbacks
+     * (which decrement it) to complete. Only then is it safe to stop threads
+     * and allow member destructors to run.
      */
     ~Balancer()
     {
+        // Block new submissions and wait for all in-flight jobs to call back.
+        mDraining.store(true, std::memory_order_release);
+        while (mSubmittedCount.load(std::memory_order_acquire) > 0)
+        {
+            std::this_thread::sleep_for(std::chrono::microseconds{100});
+        }
         stopAgingThread();
         stopHoldingDrainThread();
     }

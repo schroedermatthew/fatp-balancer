@@ -539,8 +539,10 @@ private:
             if (mConfig.maxJobDurationUs > mConfig.minJobDurationUs)
             {
                 // Jitter: uniformly distributed in [min, max].
+                // mRng is not thread-safe; acquire mMutex for the sample only.
                 std::uniform_int_distribution<uint32_t> dist(
                     mConfig.minJobDurationUs, mConfig.maxJobDurationUs);
+                std::lock_guard lock(mMutex);
                 delayUs = dist(mRng);
             }
             else

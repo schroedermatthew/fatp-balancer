@@ -128,7 +128,7 @@ FATP_TEST_CASE(node_returns_to_idle_after_job_completes)
     node.start();
     std::this_thread::sleep_for(5ms);
 
-    bool completed = false;
+    std::atomic<bool> completed{false};
     Job j = makeJob();
     j.payload = [] { std::this_thread::sleep_for(20ms); };
 

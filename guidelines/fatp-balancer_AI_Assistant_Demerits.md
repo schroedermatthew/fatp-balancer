@@ -20,14 +20,14 @@
 | Lied about capabilities | | 1 | | 1 |
 | Delivered corrupted code | 10 | | | |
 | Making information up because did not bother to look at uploaded files | 5 | | | |
-| Took the cheaper path and delivered it as if it were the fix | 5 | 5 | | |
+| Took the cheaper path and delivered it as if it were the fix | 5 | 6 | | |
 | Wrote new file from scratch instead of requesting/using existing one | | 1 | | |
 | Drew conclusions about dependencies without reading available dependency files | | 2 | | |
 | Reported non-violations as violations (fabricated rule breaches from available guidelines) | 1 | | | |
 
 ---
 
-**Totals: ChatGPT 39 | Claude 28 | Gemini 0 | GROK 1**
+**Totals: ChatGPT 39 | Claude 29 | Gemini 0 | GROK 1**
 
 *Last updated: 2026-03-08*
 

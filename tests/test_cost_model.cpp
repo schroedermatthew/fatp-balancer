@@ -210,8 +210,10 @@ FATP_TEST_CASE(nodes_are_independent)
 FATP_TEST_CASE(predict_scales_by_multiplier_when_warm)
 {
     balancer::CostModelConfig cfg;
-    cfg.warmThreshold = 1;
-    cfg.nodeAlpha     = 0.5f;
+    cfg.warmThreshold              = 1;
+    cfg.nodeAlpha                  = 0.5f;
+    cfg.affinity.warmThreshold     = 1000; // keep affinity cold — not under test
+    cfg.degradation.warmThreshold  = 1000; // keep degradation cold — not under test
     balancer::CostModel model(cfg);
 
     // Drive node to 2x multiplier

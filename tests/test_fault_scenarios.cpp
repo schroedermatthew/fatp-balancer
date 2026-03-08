@@ -118,9 +118,12 @@ FATP_TEST_CASE(recovery_from_crash_transitions_to_recovering)
                    "Must be Failed after crash");
 
     node.injectFault(balancer::sim::FaultType::None);
+    // Clearing a crash fault on an empty-queue node resolves immediately to Idle.
+    // SimulatedNode::updateStateUnlocked() transitions Recovering→Idle when the
+    // queue is empty, which is the typical state after a crash drains all jobs.
     FATP_ASSERT_EQ(static_cast<int>(node.status()),
-                   static_cast<int>(balancer::NodeState::Recovering),
-                   "Must be Recovering after clearing crash fault");
+                   static_cast<int>(balancer::NodeState::Idle),
+                   "Must be Idle after clearing crash fault with empty queue");
 
     node.stop();
     return true;

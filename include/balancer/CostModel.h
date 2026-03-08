@@ -639,7 +639,12 @@ public:
                     return fat_p::unexpected(PersistError::MalformedJson);
                 }
 
-                if (tmIt->second.is_number())
+                if (tmIt->second.is_int())
+                {
+                    state.throughputMultiplier.value =
+                        static_cast<float>(std::get<int64_t>(tmIt->second));
+                }
+                else if (std::holds_alternative<double>(tmIt->second))
                 {
                     state.throughputMultiplier.value =
                         static_cast<float>(std::get<double>(tmIt->second));
@@ -662,7 +667,12 @@ public:
                         const auto& bktObj = std::get<JsonObject>(bktVal);
                         auto vIt = bktObj.find("value");
                         auto oIt = bktObj.find("observations");
-                        if (vIt != bktObj.end() && vIt->second.is_number())
+                        if (vIt != bktObj.end() && vIt->second.is_int())
+                        {
+                            state.degradation.buckets[b].multiplier.value =
+                                static_cast<float>(std::get<int64_t>(vIt->second));
+                        }
+                        else if (vIt != bktObj.end() && std::holds_alternative<double>(vIt->second))
                         {
                             state.degradation.buckets[b].multiplier.value =
                                 static_cast<float>(std::get<double>(vIt->second));

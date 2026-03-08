@@ -352,13 +352,16 @@ public:
                 const auto& oj = obs[idx];
 
                 float v = 1.0f;
-                if (vj.is_number())
-                {
-                    v = static_cast<float>(std::get<double>(vj));
-                }
-                else if (vj.is_int())
+                // JsonLite serializes whole-number doubles (e.g., 1.0) as integer
+                // literals without a decimal point, so the parser produces int64_t,
+                // not double. Check is_int() first to avoid std::bad_variant_access.
+                if (vj.is_int())
                 {
                     v = static_cast<float>(std::get<int64_t>(vj));
+                }
+                else if (std::holds_alternative<double>(vj))
+                {
+                    v = static_cast<float>(std::get<double>(vj));
                 }
 
                 uint32_t o = 0;
