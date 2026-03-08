@@ -258,7 +258,7 @@ FATP_TEST_CASE(jobs_at_ceiling_do_not_generate_spurious_events)
     auto job = makeJob(11, balancer::Priority::Normal);
     engine.track(job, kEpoch);
 
-    engine.tick(advance(std::chrono::seconds{10})); // Normal -> High
+    (void)engine.tick(advance(std::chrono::seconds{10})); // Normal -> High
     FATP_ASSERT_EQ(engine.currentPriority(job.id), balancer::Priority::High,
                    "Job should have aged to High");
 
@@ -292,7 +292,7 @@ FATP_TEST_CASE(expired_job_removed_from_tracking)
     auto job = makeJob(14, balancer::Priority::Low);
     job.deadline = kEpoch + std::chrono::seconds{5};
     engine.track(job, kEpoch);
-    engine.tick(advance(std::chrono::seconds{5}));
+    (void)engine.tick(advance(std::chrono::seconds{5}));
     FATP_ASSERT_FALSE(engine.isTracked(job.id),
                       "Job must be removed from tracking after expiry");
     return true;
@@ -331,7 +331,7 @@ FATP_TEST_CASE(aged_job_not_re_queued_after_cancel)
     balancer::AgingEngine engine(fastConfig());
     auto job = makeJob(17, balancer::Priority::Bulk);
     engine.track(job, kEpoch);
-    engine.tick(advance(std::chrono::seconds{10})); // Bulk -> Low
+    (void)engine.tick(advance(std::chrono::seconds{10})); // Bulk -> Low
     FATP_ASSERT_EQ(engine.currentPriority(job.id), balancer::Priority::Low,
                    "Job must have aged to Low");
     engine.untrack(job.id);
@@ -382,7 +382,7 @@ FATP_TEST_CASE(tracked_count_consistent_across_operations)
     engine.track(j3, kEpoch);
     FATP_ASSERT_EQ(engine.trackedCount(), size_t(3), "Three jobs tracked");
 
-    engine.tick(advance(std::chrono::seconds{5})); // j3 expires
+    (void)engine.tick(advance(std::chrono::seconds{5})); // j3 expires
     FATP_ASSERT_EQ(engine.trackedCount(), size_t(2), "Two after j3 expires");
 
     engine.untrack(j1.id);

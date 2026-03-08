@@ -132,7 +132,7 @@ FATP_TEST_CASE(node_returns_to_idle_after_job_completes)
     Job j = makeJob();
     j.payload = [] { std::this_thread::sleep_for(20ms); };
 
-    node.submit(std::move(j), [&](Job, bool) { completed = true; });
+    (void)node.submit(std::move(j), [&](Job, bool) { completed = true; });
 
     // Wait up to 500ms for completion.
     for (int i = 0; i < 50 && !completed; ++i)
@@ -169,7 +169,7 @@ FATP_TEST_CASE(node_transitions_to_overloaded_when_queue_full)
     {
         Job j = makeJob();
         j.payload = [] { std::this_thread::sleep_for(100ms); };
-        node.submit(std::move(j), nullCallback());
+        (void)node.submit(std::move(j), nullCallback());
     }
 
     std::this_thread::sleep_for(20ms);
@@ -291,7 +291,7 @@ FATP_TEST_CASE(metrics_queue_depth_reflects_pending_jobs)
     {
         Job j = makeJob();
         j.payload = [] { std::this_thread::sleep_for(200ms); };
-        node.submit(std::move(j), nullCallback());
+        (void)node.submit(std::move(j), nullCallback());
     }
 
     std::this_thread::sleep_for(10ms);
@@ -314,7 +314,7 @@ FATP_TEST_CASE(metrics_completed_count_increments)
         Job j = makeJob();
         j.id      = JobId{static_cast<uint32_t>(i + 1)};
         j.payload = [] { std::this_thread::sleep_for(5ms); };
-        node.submit(std::move(j), [&](Job, bool) { ++done; });
+        (void)node.submit(std::move(j), [&](Job, bool) { ++done; });
     }
 
     // Wait for all completions.

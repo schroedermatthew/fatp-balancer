@@ -166,7 +166,7 @@ FATP_TEST_CASE(cost_model_warms_after_enough_completions)
     // Submit enough jobs to cross the warm threshold.
     for (int i = 0; i < 3; ++i)
     {
-        balancer.submit(makeJob());
+        (void)balancer.submit(makeJob());
     }
 
     // Wait for completions.
@@ -201,7 +201,7 @@ FATP_TEST_CASE(cost_model_multiplier_updates_from_actual_cost)
     {
         Job j = makeJob(Priority::Normal, /*costUs=*/1); // very low estimate
         j.payload = [] { std::this_thread::sleep_for(5ms); };
-        balancer.submit(std::move(j));
+        (void)balancer.submit(std::move(j));
     }
 
     for (int i = 0; i < 200 && balancer.inFlightCount() > 0; ++i)

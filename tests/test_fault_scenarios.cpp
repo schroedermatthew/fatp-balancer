@@ -144,7 +144,7 @@ FATP_TEST_CASE(slowdown_fault_delays_execution)
     {
         auto t0 = balancer::Clock::now();
         std::atomic<bool> done{false};
-        node.submit(makeJob(), [&](balancer::Job, bool)
+        (void)node.submit(makeJob(), [&](balancer::Job, bool)
         {
             baseElapsed.store(static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(
@@ -163,7 +163,7 @@ FATP_TEST_CASE(slowdown_fault_delays_execution)
     {
         auto t0 = balancer::Clock::now();
         std::atomic<bool> done{false};
-        node.submit(makeJob(), [&](balancer::Job, bool)
+        (void)node.submit(makeJob(), [&](balancer::Job, bool)
         {
             slowElapsed.store(static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(
@@ -249,7 +249,7 @@ FATP_TEST_CASE(cancel_valid_handle_succeeds)
     node.start();
 
     // Submit a long job to block the worker.
-    node.submit(makeJob(), [](balancer::Job, bool) {});
+    (void)node.submit(makeJob(), [](balancer::Job, bool) {});
 
     // Submit the target job — it will queue behind the long job.
     auto result = node.submit(makeJob(), [](balancer::Job, bool) {});
@@ -350,7 +350,7 @@ FATP_TEST_CASE(switch_policy_completes_in_flight_jobs)
     // Submit several jobs so there are in-flight jobs during the switch.
     for (int i = 0; i < 4; ++i)
     {
-        balancer.submit(makeJob());
+        (void)balancer.submit(makeJob());
     }
 
     // switchPolicy must drain and then swap — no assert; the test validates
@@ -375,7 +375,7 @@ FATP_TEST_CASE(submits_rejected_while_draining)
     balancer::Balancer balancer(cluster.nodes(), std::move(policy), fastConfig());
 
     // Submit one job to create an in-flight job.
-    balancer.submit(makeJob());
+    (void)balancer.submit(makeJob());
 
     // Launch switchPolicy on a separate thread so we can probe while it drains.
     std::atomic<bool> switchDone{false};
@@ -422,7 +422,7 @@ FATP_TEST_CASE(jitter_produces_varying_latencies)
     for (int i = 0; i < kJobs; ++i)
     {
         auto t0 = balancer::Clock::now();
-        node.submit(makeJob(), [&, t0](balancer::Job, bool)
+        (void)node.submit(makeJob(), [&, t0](balancer::Job, bool)
         {
             uint64_t us = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(

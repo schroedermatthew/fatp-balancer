@@ -57,7 +57,7 @@ BALANCER_META:
  *
  * // In the simulation tick:
  * auto result = advisor.evaluate(cluster.metrics());
- * if (!result) { /* log error *\/ }
+ * if (!result) {
  * ```
  *
  * ### Transferability

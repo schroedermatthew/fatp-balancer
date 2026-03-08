@@ -212,8 +212,13 @@ public:
             else if (fault == FaultType::None &&
                      mState == balancer::NodeState::Failed)
             {
-                mState      = balancer::NodeState::Recovering;
-                stateChange = balancer::NodeState::Recovering;
+                // Transition to Recovering first, then immediately resolve
+                // the correct state based on current queue depth.
+                // If the queue is empty (typical after a crash) this goes
+                // straight to Idle; a non-empty queue stays Recovering.
+                mState = balancer::NodeState::Recovering;
+                auto resolved = updateStateUnlocked();
+                stateChange   = resolved.value_or(mState);
             }
         }
 
@@ -292,7 +297,7 @@ public:
 
         // Submit to ThreadPool. Capture job, callback, and SlotMap handle.
         // The SlotMap handle is checked under lock before execution begins.
-        mThreadPool->submit_priority(
+        (void)mThreadPool->submit_priority(
             tpPriority,
             [this, job = std::move(job), onDone = std::move(onDone), smHandle]() mutable
             {

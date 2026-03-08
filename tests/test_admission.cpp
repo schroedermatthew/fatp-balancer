@@ -172,9 +172,9 @@ FATP_TEST_CASE(critical_bypasses_per_priority_limits)
     AdmissionControl ac(priorityRateConfig(1, 1, 1));
 
     // Drain per-priority buckets with the affected priorities.
-    ac.evaluate(Priority::Normal, false);
-    ac.evaluate(Priority::Low,    false);
-    ac.evaluate(Priority::Bulk,   false);
+    (void)ac.evaluate(Priority::Normal, false);
+    (void)ac.evaluate(Priority::Low,    false);
+    (void)ac.evaluate(Priority::Bulk,   false);
 
     // Critical and High must still pass — they have no per-priority bucket.
     auto cr = ac.evaluate(Priority::Critical, false);
@@ -248,7 +248,7 @@ FATP_TEST_CASE(holding_queue_full_produces_HoldingQueueFull)
 FATP_TEST_CASE(release_from_holding_queue_decrements_depth)
 {
     AdmissionControl ac(holdingConfig(2));
-    ac.evaluate(Priority::Critical, true); // depth = 1
+    (void)ac.evaluate(Priority::Critical, true); // depth = 1
 
     ac.releaseFromHoldingQueue(); // depth = 0
     FATP_ASSERT_EQ(ac.holdingQueueDepth(), uint32_t(0),
@@ -297,14 +297,14 @@ FATP_TEST_CASE(rejection_counters_are_independent_per_error)
     AdmissionControl ac(cfg);
 
     // Produce RateLimited: drain global, then one more.
-    ac.evaluate(Priority::Normal, false);
-    ac.evaluate(Priority::Normal, false);
-    ac.evaluate(Priority::Normal, false); // RateLimited
+    (void)ac.evaluate(Priority::Normal, false);
+    (void)ac.evaluate(Priority::Normal, false);
+    (void)ac.evaluate(Priority::Normal, false); // RateLimited
 
     // Reset by making a fresh object, then produce PriorityRejected.
     AdmissionControl ac2(cfg);
-    ac2.evaluate(Priority::Normal, false);
-    ac2.evaluate(Priority::Normal, false); // PriorityRejected (per-priority drained)
+    (void)ac2.evaluate(Priority::Normal, false);
+    (void)ac2.evaluate(Priority::Normal, false); // PriorityRejected (per-priority drained)
 
     FATP_ASSERT_EQ(ac2.rejectionCount(SubmitError::RateLimited), uint64_t(0),
         "RateLimited counter must be 0");
@@ -331,7 +331,7 @@ FATP_TEST_CASE(concurrent_submits_do_not_crash)
         {
             for (int j = 0; j < 100; ++j)
             {
-                ac.evaluate(Priority::Normal, false);
+                (void)ac.evaluate(Priority::Normal, false);
             }
         });
     }
