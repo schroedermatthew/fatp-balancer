@@ -522,7 +522,7 @@ public:
      * @return      Success or PersistError.
      */
     [[nodiscard]] fat_p::Expected<void, PersistError>
-    save(const std::string& path) const noexcept
+    save(const std::string& path) const
     {
         using namespace fat_p;
         try
@@ -589,7 +589,7 @@ public:
      * @return      Success or PersistError.
      */
     [[nodiscard]] fat_p::Expected<void, PersistError>
-    load(const std::string& path) noexcept
+    load(const std::string& path)
     {
         using namespace fat_p;
         try
