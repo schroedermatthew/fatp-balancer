@@ -12,9 +12,8 @@ BALANCER_META:
     File-backed neural-network advisor: reads a JSON inference file written by
     an external NN process and drives FeatureSupervisor::applyChanges() with the
     resulting alert name. Peer to TelemetryAdvisor — both satisfy the Advisor
-    concept and are interchangeable at the call site. Stat-gated: re-reads the
-    file only when its modification time changes, avoiding redundant applyChanges()
-    calls and mutex contention on every tick.
+    concept and are interchangeable at the call site. Reads the file unconditionally
+    on every evaluate() call; tick frequency (~15 fps) makes I/O cost negligible.
   api_stability: in_work
   related:
     docs_search: "NNAdvisor"
@@ -59,26 +58,26 @@ BALANCER_META:
  * Any additional fields (e.g. `"confidence"`) are silently ignored, allowing
  * the NN process to write richer diagnostics without breaking the C++ side.
  *
- * ### Stat-gated reads
+ * ### Read-on-every-tick
  *
- * `evaluate()` checks the file's modification time before reading. If the
- * time has not changed since the last successful read, `evaluate()` calls
- * `applyChanges()` with the cached alert name — no I/O occurs. This prevents
- * redundant file reads and superfluous FeatureSupervisor mutex acquisitions on
- * ticks where the NN has not yet produced new output.
+ * `evaluate()` reads and parses the inference file unconditionally on every
+ * call. The tick loop runs at ~15 fps (66 ms per frame); a full file read of a
+ * ~50-byte JSON file costs ~10–20 µs — well under 0.1% of the frame budget.
+ * The simplicity of always reading outweighs any benefit from caching, and
+ * avoids the sub-second mtime granularity hazard of stat-based gating.
  *
- * If the file does not exist on the first call, `evaluate()` returns an error
- * and leaves the supervisor in its current state. Subsequent calls retry.
+ * If the file does not exist, `evaluate()` returns an error and leaves the
+ * supervisor in its current state. The next call retries.
  *
  * ### Comparison with TelemetryAdvisor
  *
- * | Property            | TelemetryAdvisor            | NNAdvisor                       |
- * |---------------------|-----------------------------|---------------------------------|
- * | Alert source        | In-process threshold logic  | External NN inference file      |
- * | `evaluate()` arg    | `const ClusterMetrics&`     | None (file is the input)        |
- * | I/O                 | None                        | `std::filesystem::status` + read|
+ * | Property            | TelemetryAdvisor            | NNAdvisor                   |
+ * |---------------------|-----------------------------|-----------------------------|
+ * | Alert source        | In-process threshold logic  | External NN inference file  |
+ * | `evaluate()` arg    | `const ClusterMetrics&`     | None (file is the input)    |
+ * | I/O                 | None                        | File read + JSON parse      |
  * | Failure modes       | applyChanges rejection only | File I/O, JSON parse, bad alert |
- * | Reconfiguration     | Replace TelemetryThresholds | Replace NN model externally     |
+ * | Reconfiguration     | Replace TelemetryThresholds | Replace NN model externally |
  *
  * Both classes satisfy the `Advisor` concept and are interchangeable at the
  * call site.
@@ -93,7 +92,6 @@ BALANCER_META:
  * @see BalancerFeatures.h for the canonical alert name constants.
  */
 
-#include <filesystem>
 #include <string>
 #include <string_view>
 
@@ -127,23 +125,23 @@ namespace balancer
  * ## Invariant
  *
  * After a successful `evaluate()` call, the supervisor's active alert matches
- * the alert in the most recently read inference file. If the file has not
- * changed since the last read, the supervisor's alert is unchanged.
+ * the alert in the inference file at the time of that call.
  *
  * ## Complexity model
  *
- * `evaluate()` is O(1) on a cache hit (one `std::filesystem::last_write_time`
- * call + one `applyChanges()` call). On a cache miss it additionally performs
- * one file read, one JSON parse, and one string comparison — all bounded by
- * the file size, which is expected to be a few hundred bytes.
+ * `evaluate()` performs one file read, one JSON parse, and one string
+ * comparison per call — all bounded by the file size, which is expected to be
+ * a few hundred bytes (~10–20 µs at the tick rates used in this project).
+ * The `applyChanges()` call is O(F) in the number of features, a small
+ * constant.
  *
  * ## Concurrency model
  *
- * NNAdvisor is **not thread-safe**. It owns mutable stat-cache state
- * (`mLastWriteTime`, `mCachedAlert`) that is not protected by any lock.
- * Callers must serialise `evaluate()` calls externally, or instantiate one
- * NNAdvisor per thread. The supervised FeatureSupervisor uses
- * MutexSynchronizationPolicy and is safe to call from any thread.
+ * NNAdvisor has no internal mutable state; all mutable state lives in the
+ * FeatureSupervisor (which uses `MutexSynchronizationPolicy`). Concurrent
+ * `evaluate()` calls are therefore safe as long as the supervisor is
+ * thread-safe, but callers should avoid concurrent evaluation — the second
+ * call is redundant and adds contention.
  *
  * ## Error model
  *
@@ -155,8 +153,8 @@ namespace balancer
  * - `"active_alert"` value is not a recognised alert constant.
  * - `applyChanges()` rejects the transition (graph constraint violation).
  *
- * On any error the supervisor remains in its prior state and the stat cache
- * is not updated (the next call will retry the read).
+ * On any error the supervisor remains in its prior state. The next call
+ * retries the read from scratch.
  */
 class NNAdvisor
 {
@@ -190,45 +188,20 @@ public:
     // -------------------------------------------------------------------------
 
     /**
-     * @brief Read the inference file (if updated) and apply the alert.
+     * @brief Read the inference file and apply the alert to the supervisor.
      *
-     * Checks the file's modification time. If unchanged since the last
-     * successful read, calls `applyChanges()` with the cached alert name
-     * (no I/O). If the file has been updated, reads and parses it, validates
-     * the alert name, updates the stat cache, and calls `applyChanges()`.
-     *
-     * The call is idempotent with respect to the supervisor: if the determined
-     * alert matches the current active alert, `applyChanges()` returns
-     * immediately without acquiring the feature graph lock.
+     * Reads and parses the inference file on every call, validates the
+     * `"active_alert"` value, and calls `applyChanges()`. The call is
+     * idempotent with respect to the supervisor: if the file's alert matches
+     * the current active alert, `applyChanges()` returns immediately.
      *
      * @return `{}` on success. A descriptive error string on any failure; the
-     *         supervisor remains in its prior state and the stat cache is not
-     *         updated.
+     *         supervisor remains in its prior state.
      */
     [[nodiscard]] fat_p::Expected<void, std::string>
     evaluate()
     {
-        namespace fs = std::filesystem;
-
-        // ---- Stat the file --------------------------------------------------
-        std::error_code ec;
-        const fs::file_time_type mtime =
-            fs::last_write_time(mInferenceFilePath, ec);
-
-        if (ec)
-        {
-            return fat_p::unexpected(
-                "NNAdvisor: cannot stat inference file '" +
-                mInferenceFilePath + "': " + ec.message());
-        }
-
-        // ---- Cache hit: file unchanged since last read ----------------------
-        if (mStatCacheValid && mtime == mLastWriteTime)
-        {
-            return mSupervisor.applyChanges(mCachedAlert);
-        }
-
-        // ---- Cache miss: read and parse the file ----------------------------
+        // ---- Read and parse the file ----------------------------------------
         fat_p::JsonValue root;
         try
         {
@@ -277,19 +250,7 @@ public:
         }
 
         // ---- Apply to supervisor --------------------------------------------
-        auto result = mSupervisor.applyChanges(alertValue);
-        if (!result)
-        {
-            // Do not update stat cache — retry the read next tick.
-            return result;
-        }
-
-        // ---- Commit stat cache ----------------------------------------------
-        mLastWriteTime  = mtime;
-        mCachedAlert    = alertValue;
-        mStatCacheValid = true;
-
-        return {};
+        return mSupervisor.applyChanges(alertValue);
     }
 
     // -------------------------------------------------------------------------
@@ -343,18 +304,8 @@ private:
     // Data members
     // -------------------------------------------------------------------------
 
-    FeatureSupervisor&              mSupervisor;
-    std::string                     mInferenceFilePath;
-
-    /// Modification time of the inference file at the last successful read.
-    /// Only valid when mStatCacheValid is true.
-    std::filesystem::file_time_type mLastWriteTime{};
-
-    /// Alert name from the last successfully parsed inference file.
-    std::string                     mCachedAlert;
-
-    /// False until the first successful evaluate() call.
-    bool                            mStatCacheValid{false};
+    FeatureSupervisor&  mSupervisor;
+    std::string         mInferenceFilePath;
 };
 
 } // namespace balancer

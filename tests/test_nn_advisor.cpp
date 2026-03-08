@@ -9,11 +9,10 @@ BALANCER_META:
   summary: >
     Functional tests for NNAdvisor. Covers: healthy-state inference file,
     overload/latency/node_fault alerts, kAlertNone synonym, empty-string
-    healthy state, stat-gate cache hit (no re-read when file unchanged),
-    cache invalidation on file update, missing file error, malformed JSON
+    healthy state, idempotent evaluate (same file, same alert), alert transition
+    on file overwrite, revert to healthy, missing file error, malformed JSON
     error, missing active_alert field error, unknown alert name error,
-    applyChanges rejection propagated correctly, and inferenceFilePath/
-    currentAlert accessors.
+    non-string active_alert error, non-object root error, and accessor tests.
   api_stability: internal
   related:
     headers:
@@ -37,8 +36,6 @@ BALANCER_META:
 #include <fstream>
 #include <memory>
 #include <string>
-#include <thread>
-#include <chrono>
 
 #include "FatPTest.h"
 
@@ -223,31 +220,24 @@ FATP_TEST_CASE(extra_fields_silently_ignored)
     return true;
 }
 
-FATP_TEST_CASE(stat_cache_hit_no_reread)
+FATP_TEST_CASE(idempotent_evaluate_same_file)
 {
-    // After the first evaluate(), a second call with the file unchanged
-    // should succeed without re-reading (verifiable by writing invalid JSON
-    // after the first read — the advisor should not see it).
+    // Two consecutive evaluate() calls with the same file content must both
+    // succeed and leave the supervisor in the same alert state.
     TestFixture fx;
-    TempFile    tf{"/tmp/test_nn_cache_hit.json"};
+    TempFile    tf{"/tmp/test_nn_idempotent.json"};
     writeInferenceFile(tf.path, std::string(features::kAlertOverload));
 
     NNAdvisor advisor{*fx.supervisor, tf.path};
 
-    // First read — populates cache.
     auto r1 = advisor.evaluate();
     FATP_ASSERT_TRUE(r1.has_value(), "first evaluate() should succeed");
 
-    // Overwrite with invalid JSON — but do NOT touch the mtime by using the
-    // same content length and hoping the OS coalesces writes within the same
-    // second. Since filesystem mtime granularity may be 1s, we test the
-    // semantic: the cached alert is still applied even if we can't guarantee
-    // the mtime comparison in CI. We verify no error is returned.
     auto r2 = advisor.evaluate();
-    FATP_ASSERT_TRUE(r2.has_value(), "second evaluate() (cache hit) should succeed");
+    FATP_ASSERT_TRUE(r2.has_value(), "second evaluate() should succeed");
     FATP_ASSERT_EQ(std::string(advisor.currentAlert()),
                    std::string(features::kAlertOverload),
-                   "alert should remain kAlertOverload on cache hit");
+                   "alert should remain kAlertOverload after repeated evaluate()");
 
     return true;
 }
@@ -260,21 +250,16 @@ FATP_TEST_CASE(alert_transition_overload_to_latency)
 
     NNAdvisor advisor{*fx.supervisor, tf.path};
     FATP_ASSERT_TRUE(advisor.evaluate().has_value(), "initial overload evaluate should succeed");
+    FATP_ASSERT_EQ(std::string(advisor.currentAlert()),
+                   std::string(features::kAlertOverload),
+                   "alert should be kAlertOverload after first evaluate");
 
-    // Ensure mtime advances by writing after a brief pause so the stat gate fires.
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    // Force mtime update by reopening the file — on Linux this reliably advances
-    // the mtime even within the same second because nanosecond mtimes are used.
-    {
-        std::ofstream f(tf.path, std::ios::trunc);
-        f << "{\"active_alert\":\"" << features::kAlertLatency << "\"}";
-    }
+    // Overwrite the file — next evaluate() reads it fresh unconditionally.
+    writeInferenceFile(tf.path, std::string(features::kAlertLatency));
 
-    // Invalidate stat cache by constructing a fresh advisor on the same file.
-    NNAdvisor advisor2{*fx.supervisor, tf.path};
-    auto r2 = advisor2.evaluate();
+    auto r2 = advisor.evaluate();
     FATP_ASSERT_TRUE(r2.has_value(), "latency evaluate should succeed");
-    FATP_ASSERT_EQ(std::string(advisor2.currentAlert()),
+    FATP_ASSERT_EQ(std::string(advisor.currentAlert()),
                    std::string(features::kAlertLatency),
                    "alert should transition to kAlertLatency");
 
@@ -308,8 +293,8 @@ FATP_TEST_CASE(missing_file_returns_error)
 
     auto result = advisor.evaluate();
     FATP_ASSERT_TRUE(!result.has_value(), "evaluate() should fail for missing file");
-    FATP_ASSERT_TRUE(result.error().find("cannot stat") != std::string::npos,
-        "error message should mention stat failure");
+    FATP_ASSERT_TRUE(result.error().find("failed to read/parse") != std::string::npos,
+        "error message should mention read/parse failure");
 
     return true;
 }
@@ -444,7 +429,7 @@ bool test_NNAdvisor()
     FATP_RUN_TEST_NS(runner, nnadvisornss, reads_latency_alert);
     FATP_RUN_TEST_NS(runner, nnadvisornss, reads_node_fault_alert);
     FATP_RUN_TEST_NS(runner, nnadvisornss, extra_fields_silently_ignored);
-    FATP_RUN_TEST_NS(runner, nnadvisornss, stat_cache_hit_no_reread);
+    FATP_RUN_TEST_NS(runner, nnadvisornss, idempotent_evaluate_same_file);
     FATP_RUN_TEST_NS(runner, nnadvisornss, alert_transition_overload_to_latency);
     FATP_RUN_TEST_NS(runner, nnadvisornss, revert_to_healthy);
     FATP_RUN_TEST_NS(runner, nnadvisornss, missing_file_returns_error);
