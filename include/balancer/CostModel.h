@@ -228,6 +228,36 @@ struct NodeLearningState
     DegradationCurve degradation;
 };
 
+// tryParseJson: wraps fat_p::parse_json in a non-inline function so MSVC
+// generates a real call frame with correct EH unwind tables.
+//
+// fat_p::parse_json throws via FATP_JSON_ENFORCE_impl, which is declared
+// [[noreturn]] inline. MSVC's Release optimizer exploits [[noreturn]] to
+// eliminate EH infrastructure at inline call sites, meaning catch(...) blocks
+// that rely on catching those exceptions are silently made unreachable —
+// triggering std::terminate (0xc0000409) instead of propagating the exception.
+// Calling through a non-inlined boundary forces MSVC to emit a proper call
+// instruction with full EH table entries, restoring correct behaviour.
+//
+// GCC and Clang are unaffected but the noinline attribute is harmless there.
+#if defined(_MSC_VER)
+[[nodiscard]] __declspec(noinline)
+#else
+[[nodiscard]] __attribute__((noinline))
+#endif
+inline fat_p::Expected<fat_p::JsonValue, bool>
+tryParseJson(const std::string& content)
+{
+    try
+    {
+        return fat_p::parse_json(content);
+    }
+    catch (...)
+    {
+        return fat_p::unexpected(false);
+    }
+}
+
 } // namespace balancer::detail
 
 namespace balancer
@@ -592,6 +622,17 @@ public:
     load(const std::string& path)
     {
         using namespace fat_p;
+
+        // Helper: reset model to cold-start state under the lock.
+        // Called on every failure path so callers always see a consistent empty
+        // model regardless of how the load failed.
+        auto clearModel = [this]()
+        {
+            std::lock_guard lock(mMutex);
+            mNodeStates.clear();
+            mAffinityMatrix.reset();
+        };
+
         try
         {
             std::ifstream in(path);
@@ -599,26 +640,28 @@ public:
 
             std::string content((std::istreambuf_iterator<char>(in)),
                                  std::istreambuf_iterator<char>());
-            JsonValue root = parse_json(content);
-            if (!root.is_object()) { return fat_p::unexpected(PersistError::MalformedJson); }
+            auto parseResult = detail::tryParseJson(content);
+            if (!parseResult.has_value()) { clearModel(); return fat_p::unexpected(PersistError::MalformedJson); }
+            JsonValue root = std::move(parseResult).value();
+            if (!root.is_object()) { clearModel(); return fat_p::unexpected(PersistError::MalformedJson); }
 
             const auto& rootObj = std::get<JsonObject>(root);
 
             // 1. Parse affinity onto a temporary (validates dimensions).
             auto affinityIt = rootObj.find("affinity");
-            if (affinityIt == rootObj.end()) { return fat_p::unexpected(PersistError::MalformedJson); }
+            if (affinityIt == rootObj.end()) { clearModel(); return fat_p::unexpected(PersistError::MalformedJson); }
 
             AffinityMatrix tmpAffinity(mConfig.affinity);
             if (!tmpAffinity.load(affinityIt->second))
             {
-                return fat_p::unexpected(PersistError::DimensionMismatch);
+                clearModel(); return fat_p::unexpected(PersistError::DimensionMismatch);
             }
 
             // 2. Parse node states.
             auto nodesIt = rootObj.find("nodes");
             if (nodesIt == rootObj.end() || !nodesIt->second.is_object())
             {
-                return fat_p::unexpected(PersistError::MalformedJson);
+                clearModel(); return fat_p::unexpected(PersistError::MalformedJson);
             }
 
             FastHashMap<uint32_t, detail::NodeLearningState> tmpNodes;
@@ -626,7 +669,7 @@ public:
 
             for (const auto& [keyStr, nodeVal] : nodesObj)
             {
-                if (!nodeVal.is_object()) { return fat_p::unexpected(PersistError::MalformedJson); }
+                if (!nodeVal.is_object()) { clearModel(); return fat_p::unexpected(PersistError::MalformedJson); }
                 const auto& ns = std::get<JsonObject>(nodeVal);
 
                 detail::NodeLearningState state;
@@ -636,7 +679,7 @@ public:
                 auto ocIt = ns.find("observationCount");
                 if (tmIt == ns.end() || ocIt == ns.end())
                 {
-                    return fat_p::unexpected(PersistError::MalformedJson);
+                    clearModel(); return fat_p::unexpected(PersistError::MalformedJson);
                 }
 
                 if (tmIt->second.is_int())
@@ -709,9 +752,7 @@ public:
         }
         catch (...)
         {
-            std::lock_guard lock(mMutex);
-            mNodeStates.clear();
-            mAffinityMatrix.reset();
+            clearModel();
             return fat_p::unexpected(PersistError::MalformedJson);
         }
     }
