@@ -592,26 +592,6 @@ public:
     load(const std::string& path) noexcept
     {
         using namespace fat_p;
-
-        // RAII guard: reset the model on any failure path (early return or
-        // exception) so callers always see a consistent cold-start state.
-        // Set committed=true just before the success return to suppress cleanup.
-        bool committed = false;
-        struct ScopeReset
-        {
-            bool&       committed;
-            CostModel*  self;
-            ~ScopeReset()
-            {
-                if (!committed)
-                {
-                    std::lock_guard lock(self->mMutex);
-                    self->mNodeStates.clear();
-                    self->mAffinityMatrix.reset();
-                }
-            }
-        } guard{committed, this};
-
         try
         {
             std::ifstream in(path);
@@ -725,11 +705,13 @@ public:
                 mAffinityMatrix.load(affinitySnapshot);
             }
 
-            committed = true;
             return {};
         }
         catch (...)
         {
+            std::lock_guard lock(mMutex);
+            mNodeStates.clear();
+            mAffinityMatrix.reset();
             return fat_p::unexpected(PersistError::MalformedJson);
         }
     }
