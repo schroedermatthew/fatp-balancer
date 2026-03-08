@@ -33,6 +33,7 @@ BALANCER_META:
  */
 
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
@@ -82,11 +83,17 @@ inline void writeInferenceFileWithExtra(const std::string& path,
       << "\",\"confidence\":" << confidence << "}";
 }
 
+/// Returns a path inside the system temp directory with the given filename.
+inline std::string tmpPath(const char* filename)
+{
+    return (std::filesystem::temp_directory_path() / filename).string();
+}
+
 /// RAII helper: removes a file when it goes out of scope.
 struct TempFile
 {
     std::string path;
-    explicit TempFile(std::string p) : path(std::move(p)) {}
+    explicit TempFile(const char* filename) : path(tmpPath(filename)) {}
     ~TempFile() { std::remove(path.c_str()); }
 };
 
@@ -122,7 +129,7 @@ struct TestFixture
 FATP_TEST_CASE(reads_healthy_empty_string)
 {
     TestFixture fx;
-    TempFile    tf{"/tmp/test_nn_healthy_empty.json"};
+    TempFile    tf{"test_nn_healthy_empty.json"};
     writeInferenceFile(tf.path, "");
 
     NNAdvisor advisor{*fx.supervisor, tf.path};
@@ -138,7 +145,7 @@ FATP_TEST_CASE(reads_healthy_empty_string)
 FATP_TEST_CASE(reads_alert_none_synonym)
 {
     TestFixture fx;
-    TempFile    tf{"/tmp/test_nn_alert_none.json"};
+    TempFile    tf{"test_nn_alert_none.json"};
     writeInferenceFile(tf.path, std::string(features::kAlertNone));
 
     NNAdvisor advisor{*fx.supervisor, tf.path};
@@ -155,7 +162,7 @@ FATP_TEST_CASE(reads_alert_none_synonym)
 FATP_TEST_CASE(reads_overload_alert)
 {
     TestFixture fx;
-    TempFile    tf{"/tmp/test_nn_overload.json"};
+    TempFile    tf{"test_nn_overload.json"};
     writeInferenceFile(tf.path, std::string(features::kAlertOverload));
 
     NNAdvisor advisor{*fx.supervisor, tf.path};
@@ -172,7 +179,7 @@ FATP_TEST_CASE(reads_overload_alert)
 FATP_TEST_CASE(reads_latency_alert)
 {
     TestFixture fx;
-    TempFile    tf{"/tmp/test_nn_latency.json"};
+    TempFile    tf{"test_nn_latency.json"};
     writeInferenceFile(tf.path, std::string(features::kAlertLatency));
 
     NNAdvisor advisor{*fx.supervisor, tf.path};
@@ -189,7 +196,7 @@ FATP_TEST_CASE(reads_latency_alert)
 FATP_TEST_CASE(reads_node_fault_alert)
 {
     TestFixture fx;
-    TempFile    tf{"/tmp/test_nn_node_fault.json"};
+    TempFile    tf{"test_nn_node_fault.json"};
     writeInferenceFile(tf.path, std::string(features::kAlertNodeFault));
 
     NNAdvisor advisor{*fx.supervisor, tf.path};
@@ -206,7 +213,7 @@ FATP_TEST_CASE(reads_node_fault_alert)
 FATP_TEST_CASE(extra_fields_silently_ignored)
 {
     TestFixture fx;
-    TempFile    tf{"/tmp/test_nn_extra_fields.json"};
+    TempFile    tf{"test_nn_extra_fields.json"};
     writeInferenceFileWithExtra(tf.path, std::string(features::kAlertOverload), 0.87f);
 
     NNAdvisor advisor{*fx.supervisor, tf.path};
@@ -225,7 +232,7 @@ FATP_TEST_CASE(idempotent_evaluate_same_file)
     // Two consecutive evaluate() calls with the same file content must both
     // succeed and leave the supervisor in the same alert state.
     TestFixture fx;
-    TempFile    tf{"/tmp/test_nn_idempotent.json"};
+    TempFile    tf{"test_nn_idempotent.json"};
     writeInferenceFile(tf.path, std::string(features::kAlertOverload));
 
     NNAdvisor advisor{*fx.supervisor, tf.path};
@@ -245,7 +252,7 @@ FATP_TEST_CASE(idempotent_evaluate_same_file)
 FATP_TEST_CASE(alert_transition_overload_to_latency)
 {
     TestFixture fx;
-    TempFile    tf{"/tmp/test_nn_transition.json"};
+    TempFile    tf{"test_nn_transition.json"};
     writeInferenceFile(tf.path, std::string(features::kAlertOverload));
 
     NNAdvisor advisor{*fx.supervisor, tf.path};
@@ -269,7 +276,7 @@ FATP_TEST_CASE(alert_transition_overload_to_latency)
 FATP_TEST_CASE(revert_to_healthy)
 {
     TestFixture fx;
-    TempFile    tf{"/tmp/test_nn_revert.json"};
+    TempFile    tf{"test_nn_revert.json"};
     writeInferenceFile(tf.path, std::string(features::kAlertOverload));
 
     NNAdvisor advisor{*fx.supervisor, tf.path};
@@ -289,7 +296,7 @@ FATP_TEST_CASE(revert_to_healthy)
 FATP_TEST_CASE(missing_file_returns_error)
 {
     TestFixture fx;
-    NNAdvisor advisor{*fx.supervisor, "/tmp/this_file_does_not_exist_nnadvisor.json"};
+    NNAdvisor advisor{*fx.supervisor, tmpPath("this_file_does_not_exist_nnadvisor.json")};
 
     auto result = advisor.evaluate();
     FATP_ASSERT_TRUE(!result.has_value(), "evaluate() should fail for missing file");
@@ -302,7 +309,7 @@ FATP_TEST_CASE(missing_file_returns_error)
 FATP_TEST_CASE(malformed_json_returns_error)
 {
     TestFixture fx;
-    TempFile    tf{"/tmp/test_nn_malformed.json"};
+    TempFile    tf{"test_nn_malformed.json"};
     {
         std::ofstream f(tf.path);
         f << "this is not json {{{";
@@ -320,7 +327,7 @@ FATP_TEST_CASE(malformed_json_returns_error)
 FATP_TEST_CASE(missing_active_alert_field_returns_error)
 {
     TestFixture fx;
-    TempFile    tf{"/tmp/test_nn_no_field.json"};
+    TempFile    tf{"test_nn_no_field.json"};
     {
         std::ofstream f(tf.path);
         f << "{\"confidence\":0.9}";
@@ -339,7 +346,7 @@ FATP_TEST_CASE(missing_active_alert_field_returns_error)
 FATP_TEST_CASE(unknown_alert_name_returns_error)
 {
     TestFixture fx;
-    TempFile    tf{"/tmp/test_nn_unknown_alert.json"};
+    TempFile    tf{"test_nn_unknown_alert.json"};
     writeInferenceFile(tf.path, "alert.made_up_by_nn");
 
     NNAdvisor advisor{*fx.supervisor, tf.path};
@@ -355,7 +362,7 @@ FATP_TEST_CASE(unknown_alert_name_returns_error)
 FATP_TEST_CASE(non_string_active_alert_returns_error)
 {
     TestFixture fx;
-    TempFile    tf{"/tmp/test_nn_nonstring.json"};
+    TempFile    tf{"test_nn_nonstring.json"};
     {
         std::ofstream f(tf.path);
         f << "{\"active_alert\":42}";
@@ -372,7 +379,7 @@ FATP_TEST_CASE(non_string_active_alert_returns_error)
 FATP_TEST_CASE(non_object_root_returns_error)
 {
     TestFixture fx;
-    TempFile    tf{"/tmp/test_nn_array_root.json"};
+    TempFile    tf{"test_nn_array_root.json"};
     {
         std::ofstream f(tf.path);
         f << "[\"alert.overload\"]";
@@ -391,7 +398,7 @@ FATP_TEST_CASE(non_object_root_returns_error)
 FATP_TEST_CASE(accessor_inference_file_path)
 {
     TestFixture fx;
-    const std::string path = "/tmp/test_nn_accessor.json";
+    const std::string path = tmpPath("test_nn_accessor.json");
     NNAdvisor advisor{*fx.supervisor, path};
     FATP_ASSERT_EQ(advisor.inferenceFilePath(), path,
         "inferenceFilePath() should return the path passed at construction");
@@ -401,7 +408,7 @@ FATP_TEST_CASE(accessor_inference_file_path)
 FATP_TEST_CASE(accessor_supervisor)
 {
     TestFixture fx;
-    NNAdvisor advisor{*fx.supervisor, "/tmp/x.json"};
+    NNAdvisor advisor{*fx.supervisor, tmpPath("x.json")};
     // Just verify it returns a reference to the same object.
     FATP_ASSERT_TRUE(&advisor.supervisor() == fx.supervisor.get(),
         "supervisor() should return the supervised FeatureSupervisor");
