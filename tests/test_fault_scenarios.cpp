@@ -176,8 +176,16 @@ FATP_TEST_CASE(slowdown_fault_delays_execution)
         while (!done.load()) { std::this_thread::sleep_for(std::chrono::microseconds{100}); }
     }
 
-    FATP_ASSERT_GT(slowElapsed.load(), baseElapsed.load(),
-                   "Slowdown job must take longer than baseline");
+    // The slowdown job must take at least 1.5× the configured job duration.
+    // We do NOT compare against measured baseline elapsed, because the baseline
+    // includes OS scheduling jitter (thread pool dispatch latency) that can
+    // swamp the 1ms simulated job on a loaded CI runner.  Instead, check that
+    // the slowdown job took at least 75% of (slowdownFactor × minJobDurationUs)
+    // — a floor that must be met regardless of the scheduler load.
+    const uint64_t minExpectedUs =
+        static_cast<uint64_t>(nc.minJobDurationUs) * faultCfg.slowdownFactor * 3 / 4;
+    FATP_ASSERT_GT(slowElapsed.load(), minExpectedUs,
+                   "Slowdown job must meet minimum slowdown-factor floor");
 
     node.injectFault(balancer::sim::FaultType::None);
     node.stop();

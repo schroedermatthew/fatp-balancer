@@ -292,7 +292,8 @@ FATP_TEST_CASE(costmodel_reset_clears_affinity)
 
 FATP_TEST_CASE(costmodel_save_load_file_round_trip)
 {
-    const std::string path = "/tmp/balancer_model_test.json";
+    const std::string path =
+        (std::filesystem::temp_directory_path() / "balancer_model_test.json").string();
 
     balancer::CostModelConfig cfg;
     cfg.warmThreshold           = 3;
@@ -333,7 +334,8 @@ FATP_TEST_CASE(costmodel_save_load_file_round_trip)
 FATP_TEST_CASE(costmodel_load_missing_file_returns_error)
 {
     balancer::CostModel model;
-    auto r = model.load("/tmp/balancer_does_not_exist_xyz_phase5.json");
+    auto r = model.load(
+        (std::filesystem::temp_directory_path() / "balancer_does_not_exist_xyz_phase5.json").string());
     FATP_SIMPLE_ASSERT(!r.has_value(), "assertion failed");
     FATP_SIMPLE_ASSERT(r.error() == balancer::PersistError::FileOpenFailed, "assertion failed");
     return true;
@@ -341,7 +343,8 @@ FATP_TEST_CASE(costmodel_load_missing_file_returns_error)
 
 FATP_TEST_CASE(costmodel_load_malformed_resets_model)
 {
-    const std::string path = "/tmp/balancer_bad_json_phase5.json";
+    const std::string path =
+        (std::filesystem::temp_directory_path() / "balancer_bad_json_phase5.json").string();
     {
         std::ofstream out(path);
         out << "{ not : valid : json !!!";
