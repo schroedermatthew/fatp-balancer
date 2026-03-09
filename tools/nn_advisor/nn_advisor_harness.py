@@ -109,6 +109,14 @@ def determine_alert(
 
     Priority order: node_fault > overload > latency > "".
 
+    Denominator is knownNodes = activeNodes + unavailableNodes + overloadedNodes,
+    matching buildClusterMetrics() in Balancer.h. overloadedNodes is reconstructed
+    from overloadedFraction * len(nodes) (the physical node count used by
+    captureSnapshot as its denominator for overloadedFraction). This makes
+    alert.overload reachable when nodes are in Overloaded state (not Failed),
+    because activeFrac can drop below overloadFraction without unavailFrac
+    reaching the node_fault threshold.
+
     Parameters
     ----------
     snap : dict
@@ -121,8 +129,15 @@ def determine_alert(
     """
     active_nodes      = int(snap.get("activeNodes", 0))
     unavailable_nodes = int(snap.get("unavailableNodes", 0))
-    total             = active_nodes + unavailable_nodes
 
+    # Reconstruct overloadedNodes from overloadedFraction (fraction of physical
+    # node count) — mirrors toClusterMetrics() in SimulatedCluster.h.
+    physical_total   = len(snap.get("nodes", []))
+    overloaded_frac  = float(snap.get("overloadedFraction", 0.0))
+    overloaded_nodes = int(overloaded_frac * physical_total + 0.5) \
+                       if physical_total > 0 else 0
+
+    total = active_nodes + unavailable_nodes + overloaded_nodes
     if total == 0:
         return ALERT_NONE
 
@@ -235,48 +250,79 @@ def cmd_generate(args: argparse.Namespace) -> None:
     written   = {a: 0 for a in ALL_ALERTS}
     n_written = 0
 
+    # NodeState constants (matches NodeState enum in LoadMetrics.h)
+    # 0=Offline, 2=Idle, 3=Busy, 4=Overloaded, 5=Draining, 6=Failed, 7=Recovering
+    STATE_IDLE      = 2
+    STATE_BUSY      = 3
+    STATE_OVERLOADED = 4
+    STATE_FAILED    = 6
+
     with out.open("w", encoding="utf-8") as f:
         while n_written < samples:
-            # Sample cluster topology
-            n_nodes        = rng.randint(2, 16)
-            active_nodes   = rng.randint(0, n_nodes)
-            unavail_nodes  = n_nodes - active_nodes
-            overloaded_n   = rng.randint(0, active_nodes)
-            failed_n       = rng.randint(0, unavail_nodes)
+            # Sample cluster topology into three disjoint buckets:
+            #   active     = Idle or Busy  → counted in activeNodes
+            #   overloaded = Overloaded    → counted in overloadedNodes (knownNodes only)
+            #   unavail    = Failed        → counted in unavailableNodes
+            # The three buckets sum to n_nodes. This is the only topology that
+            # makes alert.overload reachable with default thresholds: when many
+            # nodes are Overloaded (not Failed), activeFrac drops below 0.75 while
+            # unavailFrac stays below 0.25, so overload fires before node_fault.
+            n_nodes       = rng.randint(2, 16)
+            # Randomly apportion nodes across three buckets
+            active_n      = rng.randint(0, n_nodes)
+            remaining     = n_nodes - active_n
+            overloaded_n  = rng.randint(0, remaining)
+            unavail_n     = remaining - overloaded_n
+            failed_n      = unavail_n  # all unavailable nodes are Failed
 
             overloaded_frac = overloaded_n / n_nodes if n_nodes else 0.0
-            failed_frac     = failed_n / n_nodes if n_nodes else 0.0
+            failed_frac     = failed_n     / n_nodes if n_nodes else 0.0
 
             # Sample latencies
             p50_us = rng.randint(0, 50_000)
             p99_us = p50_us + rng.randint(0, 50_000)
 
-            in_flight      = rng.randint(0, active_nodes * 20)
+            in_flight       = rng.randint(0, max(active_n, 1) * 20)
             total_submitted = max(in_flight + rng.randint(0, 100), 1)
-            rej_rate       = rng.randint(0, total_submitted // 4)
-            rej_saturated  = rng.randint(0, total_submitted // 8)
+            rej_rate        = rng.randint(0, total_submitted // 4)
+            rej_saturated   = rng.randint(0, total_submitted // 8)
 
-            # Build per-node entries
+            # Build per-node entries with states consistent with aggregate counts
             nodes = []
-            for i in range(n_nodes):
-                util  = rng.uniform(0.0, 1.0)
-                qdep  = rng.randint(0, 20)
-                state = rng.randint(0, 7)
+            node_id = 1
+            for _ in range(active_n):
                 nodes.append({
-                    "nodeId":       i + 1,
-                    "state":        state,
-                    "utilization":  util,
-                    "queueDepth":   qdep,
-                    "p50LatencyUs": p50_us + rng.randint(-p50_us // 2, p50_us // 2 + 1),
+                    "nodeId": node_id, "state": STATE_BUSY,
+                    "utilization": rng.uniform(0.1, 0.8),
+                    "queueDepth": rng.randint(0, 10),
+                    "p50LatencyUs": max(0, p50_us + rng.randint(-p50_us // 2, p50_us // 2 + 1)),
                     "p99LatencyUs": p99_us,
-                    "completedJobs": rng.randint(0, 1000),
-                    "failedJobs":    rng.randint(0, 10),
+                    "completedJobs": rng.randint(10, 1000), "failedJobs": 0,
                 })
+                node_id += 1
+            for _ in range(overloaded_n):
+                nodes.append({
+                    "nodeId": node_id, "state": STATE_OVERLOADED,
+                    "utilization": rng.uniform(0.8, 1.0),
+                    "queueDepth": rng.randint(10, 40),
+                    "p50LatencyUs": max(0, p50_us + rng.randint(0, 10_000)),
+                    "p99LatencyUs": p99_us + rng.randint(0, 20_000),
+                    "completedJobs": rng.randint(0, 500), "failedJobs": 0,
+                })
+                node_id += 1
+            for _ in range(unavail_n):
+                nodes.append({
+                    "nodeId": node_id, "state": STATE_FAILED,
+                    "utilization": 0.0, "queueDepth": 0,
+                    "p50LatencyUs": 0, "p99LatencyUs": 0,
+                    "completedJobs": 0, "failedJobs": rng.randint(1, 50),
+                })
+                node_id += 1
 
             snap: dict[str, Any] = {
                 "nodes":                    nodes,
-                "activeNodes":              active_nodes,
-                "unavailableNodes":         unavail_nodes,
+                "activeNodes":              active_n,
+                "unavailableNodes":         unavail_n,
                 "totalSubmitted":           total_submitted,
                 "inFlightJobs":             in_flight,
                 "rejectedRateLimited":      rej_rate,

@@ -74,14 +74,13 @@ python nn_advisor_harness.py generate \
     --seed    42
 ```
 
-**Note on alert.overload:** With the default thresholds
-(`unavailableFraction=0.25`, `overloadFraction=0.75`), `alert.overload` is
-mathematically unreachable.  The two conditions share the same boundary and
-`alert.node_fault` wins by priority ordering (see `TelemetryAdvisor.h`).
-`alert.overload` only fires when custom thresholds create a gap between the
-node-fault and overload boundaries — for example `unavailableFraction=0.1`,
-`overloadFraction=0.75`.  The harness generates data for whatever thresholds
-you pass; with defaults, expect a 3-class model.
+**Note on alert.overload:** With default thresholds, `alert.overload` fires when
+nodes are in **Overloaded** state (busy but not failed).  A cluster where all nodes
+are Overloaded has `activeFrac = 0` and `unavailFrac = 0`, so overload fires
+without triggering node_fault.  The denominator is `knownNodes = active + unavailable
++ overloaded`, matching `buildClusterMetrics()` in `Balancer.h`.  The generator
+samples active/overloaded/unavailable as three disjoint buckets and produces all
+four alert classes.
 
 ### collect
 
@@ -166,7 +165,7 @@ Ctrl-C exits cleanly.
 |--------------------|-------------------------------------------------------|
 | `""`               | Healthy — no threshold crossed                        |
 | `"alert.node_fault"`| `unavailableNodes / total >= 0.25`                   |
-| `"alert.overload"` | `activeNodes / total < 0.75` (needs custom thresholds)|
+| `"alert.overload"` | `activeNodes / knownNodes < 0.75` (knownNodes includes Overloaded nodes)|
 | `"alert.latency"`  | `clusterP50LatencyUs >= 10000 µs`                    |
 
 Priority: `node_fault > overload > latency > ""`.

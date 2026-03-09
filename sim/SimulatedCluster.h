@@ -8,7 +8,7 @@ BALANCER_META:
   path: sim/SimulatedCluster.h
   namespace: balancer::sim
   layer: Sim
-  summary: >\n    Manages a set of SimulatedNodes, exposes INode pointers for the Balancer,\n    captures TelemetrySnapshot for TelemetryAdvisor, and provides tick() to\n    drive TelemetryAdvisor::evaluate() from a live ClusterMetrics snapshot.
+  summary: >\n    Manages a set of SimulatedNodes, exposes INode pointers for the Balancer,\n    captures TelemetrySnapshot for TelemetryAdvisor, provides tick() to drive\n    TelemetryAdvisor from a live ClusterMetrics snapshot, and provides\n    startSnapshotWriter() to periodically write TelemetrySnapshot JSON to disk\n    for the Python nn_advisor_harness inference loop.
   api_stability: in_work
   related:
     tests:
@@ -32,8 +32,11 @@ BALANCER_META:
  * @warning Sim layer. Do not include from include/balancer/ or policies/.
  */
 
+#include <atomic>
 #include <chrono>
+#include <fstream>
 #include <memory>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -51,21 +54,38 @@ namespace detail
 {
 
 /**
- * @brief Convert the DEBT-002-reliable fields of a TelemetrySnapshot into
- *        a ClusterMetrics for TelemetryAdvisor::evaluate().
+ * @brief Convert a TelemetrySnapshot into a ClusterMetrics for TelemetryAdvisor.
  *
- * DEBT-002: only activeNodes, unavailableNodes, and totalSubmitted are
- * reliably populated by captureSnapshot(). Latency and throughput fields
- * remain zero until Phase 8 resolves the measurement pipeline.
+ * Reconstructs the overloadedNodes count from overloadedFraction so that
+ * knownNodes = activeNodes + unavailableNodes + overloadedNodes, matching
+ * buildClusterMetrics() in Balancer. Without this, a cluster where all nodes
+ * are Overloaded (not Failed) would produce a zero denominator and suppress
+ * the alert.overload signal.
  */
 inline balancer::ClusterMetrics toClusterMetrics(const TelemetrySnapshot& snap) noexcept
 {
     balancer::ClusterMetrics cm;
-    cm.activeNodes      = snap.activeNodes;
-    cm.unavailableNodes = snap.unavailableNodes;
-    cm.totalSubmitted   = snap.totalSubmitted;
-    // throughputPerSecond, meanP50LatencyUs, maxP99LatencyUs, totalRejected
-    // left at zero — DEBT-002, Phase 8.
+    cm.activeNodes        = snap.activeNodes;
+    cm.unavailableNodes   = snap.unavailableNodes;
+    cm.totalSubmitted     = snap.totalSubmitted;
+    cm.totalCompleted     = 0; // not tracked in snapshot
+    cm.totalRejected      = snap.rejectedRateLimited
+                          + snap.rejectedPriorityRejected
+                          + snap.rejectedClusterSaturated;
+    cm.meanP50LatencyUs   = snap.clusterP50LatencyUs;
+    cm.maxP99LatencyUs    = snap.clusterP99LatencyUs;
+
+    // Reconstruct overloadedNodes from overloadedFraction so the denominator
+    // matches buildClusterMetrics(). overloadedFraction uses len(nodes) as its
+    // denominator (physical node count, see captureSnapshot).
+    const uint32_t physicalTotal = static_cast<uint32_t>(snap.nodes.size());
+    const uint32_t overloadedNodes = (physicalTotal > 0)
+        ? static_cast<uint32_t>(
+              snap.overloadedFraction * static_cast<float>(physicalTotal) + 0.5f)
+        : 0u;
+    cm.overloadedNodes = overloadedNodes;
+    cm.knownNodes      = cm.activeNodes + cm.unavailableNodes + overloadedNodes;
+
     return cm;
 }
 
@@ -162,6 +182,7 @@ public:
      */
     void stop()
     {
+        stopSnapshotWriter();
         if (!mStarted) { return; }
         mStarted = false;
         for (auto it = mNodes.rbegin(); it != mNodes.rend(); ++it)
@@ -236,6 +257,71 @@ public:
             std::this_thread::sleep_for(std::chrono::milliseconds{1});
         }
         return false;
+    }
+
+    /**
+     * @brief Start a background thread that periodically writes a
+     *        TelemetrySnapshot JSON file to @p path.
+     *
+     * The file is written atomically: the JSON is first written to
+     * `path + ".tmp"`, then renamed to `path`.  Readers (e.g. the Python
+     * nn_advisor_harness loop) therefore never observe a partial write.
+     *
+     * Calling this method a second time stops the previous writer before
+     * starting the new one.  The writer is stopped automatically by stop()
+     * and the destructor.
+     *
+     * @param balancer  The Balancer whose aggregate counts are included in the
+     *                  snapshot.  Must outlive this call (and the writer thread).
+     * @param path      Destination file path.
+     * @param interval  Write interval. Default: 500 ms.
+     */
+    void startSnapshotWriter(
+        const balancer::Balancer&       balancer,
+        std::string                     path,
+        std::chrono::milliseconds       interval = std::chrono::milliseconds{500})
+    {
+        stopSnapshotWriter();
+
+        mSnapshotWriterRunning.store(true, std::memory_order_relaxed);
+        mSnapshotWriterThread = std::thread(
+            [this, &balancer, path = std::move(path), interval]()
+            {
+                while (mSnapshotWriterRunning.load(std::memory_order_relaxed))
+                {
+                    TelemetrySnapshot snap = captureSnapshot(balancer);
+                    const std::string json = formatJson(snap, /*pretty=*/false);
+
+                    // Atomic write: tmp → rename
+                    const std::string tmpPath = path + ".tmp";
+                    {
+                        std::ofstream f(tmpPath,
+                                        std::ios::out | std::ios::trunc);
+                        if (f.is_open())
+                        {
+                            f << json;
+                        }
+                    }
+                    std::rename(tmpPath.c_str(), path.c_str());
+
+                    std::this_thread::sleep_for(interval);
+                }
+            });
+    }
+
+    /**
+     * @brief Stop the snapshot writer thread if running.  Idempotent.
+     *
+     * Blocks until the writer thread exits. Called automatically by stop()
+     * and the destructor.
+     */
+    void stopSnapshotWriter()
+    {
+        mSnapshotWriterRunning.store(false, std::memory_order_relaxed);
+        if (mSnapshotWriterThread.joinable())
+        {
+            mSnapshotWriterThread.join();
+        }
     }
 
     /**
@@ -353,6 +439,9 @@ public:
 private:
     std::vector<std::unique_ptr<SimulatedNode>> mNodes;
     bool mStarted = false;
+
+    std::atomic<bool> mSnapshotWriterRunning{false};
+    std::thread       mSnapshotWriterThread;
 };
 
 } // namespace balancer::sim
