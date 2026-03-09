@@ -6,7 +6,11 @@ BALANCER_META:
   path: wasm/BalancerBindings.cpp
   namespace: [balancer, wasm]
   layer: Demo
-  summary: Emscripten embind glue — exposes BalancerDemo to JavaScript. Phase 10 update: uses PolicyFactory, exposes HoldingQueueDepth and full ClusterMetrics stats (P7-9 features).
+  summary: >
+    Emscripten embind glue — exposes BalancerDemo to JavaScript. Phase 10+
+    update: wires FeatureSupervisor + TelemetryAdvisor into tick(), exposes
+    getActiveAlert() and pushNNAlert() for browser-side NN integration,
+    completes getStats() with throughput/latency/completed/rejected fields.
   api_stability: demo_only
   related:
     docs_search: "Phase 6 WASM demo"
@@ -17,8 +21,9 @@ BALANCER_META:
  * @file BalancerBindings.cpp
  * @brief Emscripten embind bridge: C++ balancer → JavaScript.
  *
- * BalancerDemo wraps SimulatedCluster + Balancer + AffinityMatrix into a
- * single object that the JavaScript demo can drive via a simple tick-based API.
+ * BalancerDemo wraps SimulatedCluster + Balancer + FeatureSupervisor +
+ * TelemetryAdvisor into a single object that the JavaScript demo can drive
+ * via a simple tick-based API.
  *
  * Build (requires Emscripten ≥ 3.1.50):
  * @code
@@ -35,21 +40,31 @@ BALANCER_META:
  * --------------
  * Module.BalancerDemo(numNodes, numClasses)
  *   .submitJob(priority, jobClass, estimatedCost) → bool
- *   .tick()                                        → void   (advance simulation clock)
+ *   .tick()                                        → void
  *   .getNodeStates()                               → JSON string (array of NodeSnapshot)
  *   .getAffinityMatrix()                           → JSON string (flat float array + metadata)
  *   .getStats()                                    → JSON string (BalancerStats)
- *   .switchPolicy(name)                            → void   ("RoundRobin"|"LeastLoaded"|"AffinityRouting"|"WorkStealing"|"Composite")
- *   .injectFault(nodeId, faultType)                → void   ("crash"|"slowdown"|"recover")
+ *   .switchPolicy(name)                            → void
+ *   .injectFault(nodeId, faultType)                → void
+ *   .getActiveAlert()                              → string
+ *   .pushNNAlert(alertName)                        → bool
  *
  * NodeSnapshot fields: id, state, stateName, queueDepth, utilization,
  *                      completedJobs, failedJobs
  *
  * AffinityMatrix JSON: { rows, cols, values[rows*cols], observations[rows*cols] }
  *
- * BalancerStats JSON: { totalSubmitted, inFlight, policyName, isDraining,
- *                         throughputPerSecond, meanP50LatencyUs, maxP99LatencyUs,
- *                         totalCompleted, totalRejected, holdingQueueDepth }
+ * BalancerStats JSON: { totalSubmitted, totalCompleted, totalRejected,
+ *                       inFlight, holdingQueueDepth, policyName, isDraining,
+ *                       throughputPerSecond, meanP50LatencyUs, maxP99LatencyUs,
+ *                       activeAlert }
+ *
+ * pushNNAlert(alertName):
+ *   Allows a browser-side NN model (or user UI) to push an alert directly to
+ *   the FeatureSupervisor, bypassing TelemetryAdvisor threshold logic. Valid
+ *   alertName values: "", "alert.none", "alert.overload", "alert.latency",
+ *   "alert.node_fault". Returns true on success, false if the name is unknown
+ *   or the feature graph rejects the transition.
  */
 
 #include <emscripten/bind.h>
@@ -65,8 +80,10 @@ BALANCER_META:
 #include "balancer/AffinityMatrix.h"
 #include "balancer/BalancerConfig.h"
 #include "balancer/BalancerFeatures.h"
+#include "balancer/FeatureSupervisor.h"
 #include "balancer/Job.h"
 #include "balancer/LoadMetrics.h"
+#include "balancer/TelemetryAdvisor.h"
 
 // Simulation layer
 #include "sim/FaultInjector.h"
@@ -116,6 +133,9 @@ public:
             std::make_unique<balancer::LeastLoaded>(),
             cfg
         );
+
+        mSupervisor = std::make_unique<balancer::FeatureSupervisor>(*mBalancer);
+        mAdvisor    = std::make_unique<balancer::TelemetryAdvisor>(*mSupervisor);
     }
 
     // ---- Submit ------------------------------------------------------------
@@ -136,9 +156,11 @@ public:
 
     void tick()
     {
-        // SimulatedNode uses real threads — nothing to advance manually.
-        // tick() exists so the JS side can call it on its RAF loop without
-        // needing to know whether the backend is threaded or cooperative.
+        // Sample live cluster metrics and run TelemetryAdvisor. Any alert
+        // transition is applied to the FeatureSupervisor feature graph, which
+        // may trigger a policy switch (e.g. overload → WorkStealing).
+        const balancer::ClusterMetrics cm = mBalancer->clusterMetrics();
+        (void)mAdvisor->evaluate(cm);
     }
 
     // ---- State serialisation -----------------------------------------------
@@ -153,13 +175,13 @@ public:
             if (i > 0) ss << ",";
             auto m = nodes[i]->metrics();
             ss << "{"
-               << "\"id\":"           << m.nodeId.value()          << ","
-               << "\"state\":"        << static_cast<int>(m.state) << ","
-               << "\"stateName\":\""  << balancer::nodeStateName(m.state) << "\","
-               << "\"queueDepth\":"   << m.queueDepth              << ","
-               << "\"utilization\":"  << jsonDouble(m.utilization) << ","
-               << "\"completedJobs\":" << m.completedJobs          << ","
-               << "\"failedJobs\":"   << m.failedJobs
+               << "\"id\":"            << m.nodeId.value()          << ","
+               << "\"state\":"         << static_cast<int>(m.state) << ","
+               << "\"stateName\":\""   << balancer::nodeStateName(m.state) << "\","
+               << "\"queueDepth\":"    << m.queueDepth              << ","
+               << "\"utilization\":"   << jsonDouble(m.utilization) << ","
+               << "\"completedJobs\":" << m.completedJobs           << ","
+               << "\"failedJobs\":"    << m.failedJobs
                << "}";
         }
         ss << "]";
@@ -201,12 +223,21 @@ public:
 
     std::string getStats() const
     {
+        const balancer::ClusterMetrics cm = mBalancer->clusterMetrics();
         std::ostringstream ss;
         ss << "{"
-           << "\"totalSubmitted\":" << mBalancer->totalSubmitted()              << ","
-           << "\"inFlight\":"       << mBalancer->inFlightCount()               << ","
-           << "\"policyName\":\""   << mBalancer->policyName()                  << "\","
-           << "\"isDraining\":"     << (mBalancer->isDraining() ? "true" : "false")
+           << "\"totalSubmitted\":"     << cm.totalSubmitted                           << ","
+           << "\"totalCompleted\":"     << cm.totalCompleted                           << ","
+           << "\"totalRejected\":"      << cm.totalRejected                            << ","
+           << "\"inFlight\":"           << mBalancer->inFlightCount()                  << ","
+           << "\"holdingQueueDepth\":"  << mBalancer->admissionControl()
+                                                    .holdingQueueDepth()               << ","
+           << "\"policyName\":\""       << mBalancer->policyName()                     << "\","
+           << "\"isDraining\":"         << (mBalancer->isDraining() ? "true" : "false")<< ","
+           << "\"throughputPerSecond\":" << jsonDouble(cm.throughputPerSecond)          << ","
+           << "\"meanP50LatencyUs\":"   << cm.meanP50LatencyUs                        << ","
+           << "\"maxP99LatencyUs\":"    << cm.maxP99LatencyUs                         << ","
+           << "\"activeAlert\":\""      << mSupervisor->activeAlert()                  << "\""
            << "}";
         return ss.str();
     }
@@ -215,21 +246,36 @@ public:
 
     void switchPolicy(const std::string& name)
     {
-        // Delegate to PolicyFactory to support all registered policy names.
-        // Supported JS names: "RoundRobin", "LeastLoaded", "AffinityRouting",
-        //                     "WorkStealing", "Composite".
         auto p = balancer::makePolicy(name,
                                       &mBalancer->costModel(),
                                       mBalancer->config().composite);
         mBalancer->switchPolicy(std::move(p));
     }
 
-    // ---- Holding queue depth -----------------------------------------------
+    // ---- Alert query -------------------------------------------------------
 
-    int getHoldingQueueDepth() const
+    std::string getActiveAlert() const
     {
-        return static_cast<int>(
-            mBalancer->admissionControl().holdingQueueDepth());
+        return std::string(mSupervisor->activeAlert());
+    }
+
+    // ---- NN alert push -----------------------------------------------------
+
+    /**
+     * @brief Push an alert from a browser-side NN model directly to the
+     *        FeatureSupervisor, bypassing TelemetryAdvisor threshold logic.
+     *
+     * This is the WASM-appropriate alternative to NNAdvisor: the JS side
+     * runs inference (or presents a UI control) and pushes the result here.
+     * The C++ side validates the name and applies the feature-graph transition.
+     *
+     * @return true on success, false if the name is unknown or the transition
+     *         is rejected by the feature graph.
+     */
+    bool pushNNAlert(const std::string& alertName)
+    {
+        auto result = mSupervisor->applyChanges(alertName);
+        return result.has_value();
     }
 
     // ---- Fault injection ---------------------------------------------------
@@ -261,6 +307,8 @@ private:
     uint32_t mNumClasses;
     std::unique_ptr<balancer::sim::SimulatedCluster> mCluster;
     std::unique_ptr<balancer::Balancer>              mBalancer;
+    std::unique_ptr<balancer::FeatureSupervisor>     mSupervisor;
+    std::unique_ptr<balancer::TelemetryAdvisor>      mAdvisor;
 };
 
 } // namespace wasm
@@ -273,12 +321,13 @@ EMSCRIPTEN_BINDINGS(balancer_demo)
 {
     emscripten::class_<wasm::BalancerDemo>("BalancerDemo")
         .constructor<int, int>()
-        .function("submitJob",              &wasm::BalancerDemo::submitJob)
-        .function("tick",                   &wasm::BalancerDemo::tick)
-        .function("getNodeStates",          &wasm::BalancerDemo::getNodeStates)
-        .function("getAffinityMatrix",      &wasm::BalancerDemo::getAffinityMatrix)
-        .function("getStats",               &wasm::BalancerDemo::getStats)
-        .function("switchPolicy",           &wasm::BalancerDemo::switchPolicy)
-        .function("getHoldingQueueDepth",   &wasm::BalancerDemo::getHoldingQueueDepth)
-        .function("injectFault",            &wasm::BalancerDemo::injectFault);
+        .function("submitJob",            &wasm::BalancerDemo::submitJob)
+        .function("tick",                 &wasm::BalancerDemo::tick)
+        .function("getNodeStates",        &wasm::BalancerDemo::getNodeStates)
+        .function("getAffinityMatrix",    &wasm::BalancerDemo::getAffinityMatrix)
+        .function("getStats",             &wasm::BalancerDemo::getStats)
+        .function("switchPolicy",         &wasm::BalancerDemo::switchPolicy)
+        .function("injectFault",          &wasm::BalancerDemo::injectFault)
+        .function("getActiveAlert",       &wasm::BalancerDemo::getActiveAlert)
+        .function("pushNNAlert",          &wasm::BalancerDemo::pushNNAlert);
 }
